@@ -1,0 +1,130 @@
+# ============================================================
+# Visual Studio 2022 + C# 游戏服务端开发引擎 .gitignore
+# 基于 GitHub 官方模板: https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
+# ============================================================
+
+## ==================== 用户特定文件 ====================
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+## ==================== 编译输出目录 ====================
+# 构建结果和中间文件
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]uild/
+[Bb]uildLog/
+
+## ==================== Visual Studio 缓存/临时文件 ====================
+# VS 2022 工作区文件
+.vs/
+*.swo
+*.swn
+
+# 项目文件备份
+*.[Bb]ak
+*~
+
+## ==================== NuGet 包 ====================
+# 如果使用 PackageReference (推荐)，忽略 packages 目录
+[Pp]ackages/
+*.nupkg
+*.snupkg
+.nuget/
+nuget.config
+
+## ==================== 测试相关文件 ====================
+[Tt]est[Rr]esults/
+[Tt]estResults/
+*.trx
+*.coverage
+*.coverlet.json
+coverage/
+
+## ==================== 游戏服务端特定文件 ====================
+# 日志文件 (运行时生成)
+*.log
+logs/
+Log/
+log/
+
+# 数据库文件 (如果是本地测试用)
+*.mdf
+*.ldf
+*.sqlite
+*.db
+database/
+data/*.db
+
+# 配置文件中的敏感信息 (保留模板，忽略实际配置)
+appsettings.Production.json
+appsettings.*.local.json
+*.secret.json
+connectionstrings.local.json
+
+# 证书和密钥
+*.pfx
+*.p12
+*.key
+*.pem
+certs/
+
+# 性能分析文件
+*.perf
+*.prof
+profiling/
+
+# 缓存文件
+cache/
+temp/
+tmp/
+
+## ==================== 操作系统生成文件 ====================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+## ==================== IDE 其他配置文件 ====================
+# Rider
+.idea/
+*.iml
+
+# VS Code (如果混用)
+.vscode/
+*.code-workspace
+
+## ==================== 文档生成 ====================
+docfx/
+xml/
+
+## ==================== 其他 ====================
+# 大型二进制资源 (如有)
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# 部署包
+publish/
+*.zip
+*.tar.gz
