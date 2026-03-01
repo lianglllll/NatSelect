@@ -32,10 +32,10 @@ public sealed class LocalActorSystem : IActorSystem
         return selfRef;
     }
 
-    public ValueTask SendAsync(ActorRef target, IMessage message)
+    public ValueTask SendAsync(ActorRef target, IAMessage message)
     {
         if (_actors.TryGetValue(target.Id, out var actor))
-            return actor.SendAsync(message);
+            return actor.TellAsync(message);
 
         // 目标不存在：通知监视者（简化版）
         NotifyWatchers(target);
@@ -65,7 +65,7 @@ public sealed class LocalActorSystem : IActorSystem
         {
             if (_actors.TryGetValue(watcherId, out var watcherActor))
             {
-                _ = watcherActor.SendAsync(new TerminatedMessage
+                _ = watcherActor.TellAsync(new TerminatedMessage
                 {
                     ActorRef = target,
                     Sender = 0

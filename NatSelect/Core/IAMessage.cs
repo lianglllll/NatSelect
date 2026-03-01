@@ -9,23 +9,20 @@ namespace NatSelect.Core;
 /// <summary>
 /// 所有Actor消息的基接口（强制Sender标记）
 /// </summary>
-public interface IMessage
+public interface IAMessage
 {
-    /// <summary>
-    /// 消息发送者ID（由Context自动注入，业务层无需设置）
-    /// </summary>
-    ulong Sender { get; set; }
+    ActorRef Sender { get; set; }
 }
 
 /// <summary>
 /// 系统保留消息标记（调度器特殊处理）
 /// </summary>
-public interface ISystemMessage : IMessage { }
+public interface ISystemMessage : IAMessage { }
 
 /// <summary>
 /// 需要响应的消息标记（错误反馈时使用）
 /// </summary>
-public interface IResponseRequired : IMessage { }
+public interface IResponseRequired : IAMessage { }
 
 /// <summary>
 /// 业务异常（玩家操作错误，不触发Actor停止）

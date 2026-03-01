@@ -17,7 +17,7 @@ public interface IActorSystem : IAsyncDisposable
     bool IsActorAlive(ActorRef actorRef);
 
     // 消息路由（核心！）
-    ValueTask SendAsync(ActorRef target, IMessage message);
+    ValueTask SendAsync(ActorRef target, IAMessage message);
 
     // 服务注册（游戏高频：匹配服/网关）
     bool RegisterService(string serviceName, ActorRef actorRef);
