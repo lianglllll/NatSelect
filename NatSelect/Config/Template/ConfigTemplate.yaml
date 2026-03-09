@@ -1,0 +1,29 @@
+# config.yaml
+
+# 当前节点配置
+node:
+  name: "ob_game_1"       # 友好的名字
+  # id 可以不写，由代码根据名字自动生成，或者手动指定
+  # id: 101 
+  
+  actor_system:
+    max_mailbox_size: 10000
+    worker_threads: 4
+
+# 网络配置
+network:
+  listen_port: 9000
+  max_connections: 5000
+
+# 数据库配置
+database:
+  connection_string: "Host=localhost;Database=game_db;Username=postgres;Password=secret"
+  pool_size: 20
+
+# 业务数值配置 (演示动态访问)
+game_balance:
+  exp_multiplier: 1.5
+  max_player_level: 100
+  special_events:
+    - "double_exp_weekend"
+    - "holiday_bonus"
