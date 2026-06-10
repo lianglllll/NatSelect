@@ -1,6 +1,6 @@
-// 框架内部使用的proto协议，外部不需要关心
 syntax = "proto3";
 package NatSelect.Protobuf.Interval;
+option csharp_namespace = "NatSelect.Protobuf.Interval";
 
 message NatSelectEnvelope
 {
@@ -8,6 +8,7 @@ message NatSelectEnvelope
 	uint64 sender_actor_id	= 2;
 	uint64 target_node_id	= 3;
 	uint64 target_actor_id	= 4;
-	uint64 sequeunce_id		= 5;
+	uint64 sequence_id		= 5;
 	bytes payload			= 6;
+	uint64 payload_type		= 7;
 }

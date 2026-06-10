@@ -7,7 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace NatSelect.Network;
+namespace NatSelect.Common;
     /// <summary>
     /// 池化数据流
     /// </summary>

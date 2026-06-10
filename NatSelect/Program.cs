@@ -15,10 +15,10 @@ public class Program
 
         try
         {
-            string configPath = args.Length > 0 ? args[0] : "config.yaml";
+            string configPath = args.Length > 0 ? args[0] : "Config/config.yaml";
 
             // 2. 加载核心配置 (强类型)
-            var settings = ConfigLoader.Load<ConfigTemplate>("config.yaml");
+            var settings = ConfigLoader.Load<ConfigTemplate>(configPath);
 
             // 3. 处理节点名称 -> ID 转换
             //string nodeName = settings.Node.Name; // "ob_game_1"
@@ -38,7 +38,7 @@ public class Program
             {
                 // 因为 GameBalance 定义为 object，我们需要把它转回 dynamic 或者 Dictionary
                 // 这里为了演示，我们直接重新加载一次动态版，或者你在定义时直接用 dynamic
-                var dynamicConfig = ConfigLoader.LoadDynamic("config.yaml");
+                var dynamicConfig = ConfigLoader.LoadDynamic(configPath);
 
                 double expRate = dynamicConfig.game_balance.exp_multiplier;
                 Log.Information("Game Balance - Exp Rate: {Rate}", expRate);

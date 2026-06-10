@@ -1,7 +1,8 @@
 ﻿using Google.Protobuf;
 using Google.Protobuf.Reflection;
 using Serilog;
-using Common.Summer.Tools;
+using NatSelect.Common;
+using NatSelect.Core;
 using System.Buffers.Binary;
 
 namespace NatSelect.Network;
@@ -15,7 +16,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
     private static Dictionary<int, Type> m_sequence2type = new Dictionary<int, Type>();
     private static Dictionary<Type, int> m_type2sequence = new Dictionary<Type, int>();
 
-    public void Init()
+    public new void Init()
     {
 
     }
@@ -99,5 +100,24 @@ public class ProtoHelper : Singleton<ProtoHelper>
         if (BitConverter.IsLittleEndian)
             return (ushort)(data[offset] << 8 | data[offset + 1]);
         return (ushort)(data[offset + 1] << 8 | data[offset]);
+    }
+
+    /// <summary>
+    /// 序列化 Actor 消息为字节数组
+    /// </summary>
+    public byte[] Serialize(IAMessage message)
+    {
+        if (message is IMessage protoMsg)
+            return IMessageParse2ByteArray(protoMsg);
+        throw new InvalidOperationException($"Cannot serialize {message.GetType()}: does not implement IMessage");
+    }
+
+    /// <summary>
+    /// 反序列化字节数据为 Actor 消息
+    /// </summary>
+    public IAMessage? Deserialize(ByteString data, ulong payloadType)
+    {
+        var msg = ByteArrayParse2IMessage(data.Memory);
+        return msg as IAMessage;
     }
 }

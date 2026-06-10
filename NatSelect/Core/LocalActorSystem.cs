@@ -19,7 +19,7 @@ public sealed class LocalActorSystem : IActorSystem
         // 生成唯一ID（含简单节点标识：高32位=0表示本节点）
         var id = ((ulong)0 << 32) | (ulong)Interlocked.Increment(ref _nextActorId);
         var path = $"{parent.Path}/{name}";
-        var selfRef = new ActorRef(id, path);
+        var selfRef = new ActorRef(0, id);
 
         // 创建Context和Actor
         var context = new ActorContext(this, null!, selfRef, parent.Self, path); // owner稍后设置
@@ -34,7 +34,7 @@ public sealed class LocalActorSystem : IActorSystem
 
     public ValueTask SendAsync(ActorRef target, IAMessage message)
     {
-        if (_actors.TryGetValue(target.Id, out var actor))
+        if (_actors.TryGetValue(target.ActorId, out var actor))
             return actor.TellAsync(message);
 
         // 目标不存在：通知监视者（简化版）
@@ -44,17 +44,17 @@ public sealed class LocalActorSystem : IActorSystem
 
     public ValueTask StopActorAsync(ActorRef actorRef)
     {
-        if (_actors.TryRemove(actorRef.Id, out var actor))
+        if (_actors.TryRemove(actorRef.ActorId, out var actor))
             return actor.DisposeAsync();
         return ValueTask.CompletedTask;
     }
 
-    public bool IsActorAlive(ActorRef actorRef) => _actors.ContainsKey(actorRef.Id);
+    public bool IsActorAlive(ActorRef actorRef) => _actors.ContainsKey(actorRef.ActorId);
     public bool RegisterService(string name, ActorRef actorRef) => _services.TryAdd(name, actorRef);
     public bool UnregisterService(string name) => _services.TryRemove(name, out _);
     public ActorRef? LookupService(string name) => _services.TryGetValue(name, out var r) ? r : null;
-    public void Watch(ActorRef watcher, ActorRef target) => _watching.TryAdd((watcher.Id, target.Id), true);
-    public void Unwatch(ActorRef watcher, ActorRef target) => _watching.TryRemove((watcher.Id, target.Id), out _);
+    public void Watch(ActorRef watcher, ActorRef target) => _watching.TryAdd((watcher.ActorId, target.ActorId), true);
+    public void Unwatch(ActorRef watcher, ActorRef target) => _watching.TryRemove((watcher.ActorId, target.ActorId), out _);
     public int GetTotalActorCount() => _actors.Count;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
@@ -68,7 +68,7 @@ public sealed class LocalActorSystem : IActorSystem
                 _ = watcherActor.TellAsync(new TerminatedMessage
                 {
                     ActorRef = target,
-                    Sender = 0
+                    Sender = ActorRef.Invalid
                 });
             }
         }
@@ -80,6 +80,6 @@ public sealed class LocalActorSystem : IActorSystem
 /// </summary>
 public sealed class TerminatedMessage : ISystemMessage
 {
-    public ulong Sender { get; set; }
+    public ActorRef Sender { get; set; }
     public ActorRef ActorRef { get; set; }
 }

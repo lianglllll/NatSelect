@@ -23,12 +23,3 @@ public interface ISystemMessage : IAMessage { }
 /// 需要响应的消息标记（错误反馈时使用）
 /// </summary>
 public interface IResponseRequired : IAMessage { }
-
-/// <summary>
-/// 业务异常（玩家操作错误，不触发Actor停止）
-/// </summary>
-public class BusinessException : Exception
-{
-    public int Code { get; }
-    public BusinessException(int code, string message) : base(message) => Code = code;
-}

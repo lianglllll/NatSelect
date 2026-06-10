@@ -72,7 +72,7 @@ public static class NSLogger
     {
         return _logger
             .ForContext("ActorPath", context.Path) // 自动注入Actor路径
-            .ForContext("ActorId", context.Self.Id);
+            .ForContext("ActorId", context.Self.ActorId);
         // 可扩展：.ForContext("RoomId", GetRoomId(context))
     }
 

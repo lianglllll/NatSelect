@@ -1,4 +1,5 @@
-﻿using NatSelect.Logger;
+﻿using NatSelect.Common;
+using NatSelect.Logger;
 using Serilog;
 using System.Threading.Channels;
 
@@ -88,6 +89,6 @@ public abstract class Actor : IAsyncDisposable
 /// </summary>
 public sealed class SystemStopMessage : ISystemMessage
 {
-    public ulong Sender { get; set; }
+    public ActorRef Sender { get; set; }
     public string Reason { get; set; } = string.Empty;
 }
