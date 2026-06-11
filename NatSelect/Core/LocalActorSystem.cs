@@ -9,9 +9,9 @@ public sealed class LocalActorSystem : IActorSystem
 {
     private readonly ConcurrentDictionary<ulong, Actor> _actors = new();
     private readonly ConcurrentDictionary<string, ActorRef> _services = new();
-    private readonly ConcurrentDictionary<(ulong, ulong), bool> _watching = new();
+    // 索引：target ActorId -> (watcher ActorId -> true)，方便快速查找谁在监视某个目标
+    private readonly ConcurrentDictionary<ulong, ConcurrentDictionary<ulong, bool>> _watchersByTarget = new();
     private ulong _nextActorId = 1;
-    private readonly SemaphoreSlim _lock = new(1, 1);
 
     public ActorRef SpawnActor<T>(ActorContext parent, string name, params object[] args)
         where T : Actor
@@ -22,10 +22,8 @@ public sealed class LocalActorSystem : IActorSystem
         var selfRef = new ActorRef(0, id);
 
         // 创建Context和Actor
-        var context = new ActorContext(this, null!, selfRef, parent.Self, path); // owner稍后设置
+        var context = new ActorContext(this, selfRef, parent.Self, path);
         var actor = (Actor)Activator.CreateInstance(typeof(T), context, args)!;
-        context.GetType().GetField("_owner", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            ?.SetValue(context, actor); // 修复owner引用（简化处理）
 
         // 注册到系统
         _actors.TryAdd(id, actor);
@@ -53,15 +51,29 @@ public sealed class LocalActorSystem : IActorSystem
     public bool RegisterService(string name, ActorRef actorRef) => _services.TryAdd(name, actorRef);
     public bool UnregisterService(string name) => _services.TryRemove(name, out _);
     public ActorRef? LookupService(string name) => _services.TryGetValue(name, out var r) ? r : null;
-    public void Watch(ActorRef watcher, ActorRef target) => _watching.TryAdd((watcher.ActorId, target.ActorId), true);
-    public void Unwatch(ActorRef watcher, ActorRef target) => _watching.TryRemove((watcher.ActorId, target.ActorId), out _);
+    public void Watch(ActorRef watcher, ActorRef target)
+    {
+        _watchersByTarget
+            .GetOrAdd(target.ActorId, _ => new ConcurrentDictionary<ulong, bool>())
+            .TryAdd(watcher.ActorId, true);
+    }
+
+    public void Unwatch(ActorRef watcher, ActorRef target)
+    {
+        if (_watchersByTarget.TryGetValue(target.ActorId, out var watchers))
+        {
+            watchers.TryRemove(watcher.ActorId, out _);
+            if (watchers.IsEmpty) _watchersByTarget.TryRemove(target.ActorId, out _);
+        }
+    }
     public int GetTotalActorCount() => _actors.Count;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private void NotifyWatchers(ActorRef target)
     {
-        // 简化：遍历监视关系，发送Terminated消息（实际需查watcher是否存在）
-        foreach (var ((watcherId, _), _) in _watching)
+        if (!_watchersByTarget.TryGetValue(target.ActorId, out var watchers)) return;
+
+        foreach (var (watcherId, _) in watchers)
         {
             if (_actors.TryGetValue(watcherId, out var watcherActor))
             {
@@ -72,6 +84,8 @@ public sealed class LocalActorSystem : IActorSystem
                 });
             }
         }
+
+        _watchersByTarget.TryRemove(target.ActorId, out _);
     }
 }
 

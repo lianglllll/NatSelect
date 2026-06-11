@@ -5,7 +5,6 @@ namespace NatSelect.Core;
 public sealed class ActorContext : IAsyncDisposable
 {
     private readonly IActorSystem m_system;
-    private readonly Actor m_owner;
     private readonly CancellationTokenSource m_cts = new();
     private readonly ConcurrentDictionary<string, ActorRef> m_children = new();
     private readonly HashSet<ActorRef> m_watching = new();
@@ -16,10 +15,9 @@ public sealed class ActorContext : IAsyncDisposable
     public CancellationToken CancellationToken => m_cts.Token;
     public string Path { get; }
 
-    public ActorContext(IActorSystem system, Actor owner, ActorRef self, ActorRef? parent = null, string? path = null)
+    public ActorContext(IActorSystem system, ActorRef self, ActorRef? parent = null, string? path = null)
     {
         m_system = system ?? throw new ArgumentNullException(nameof(system));
-        m_owner = owner ?? throw new ArgumentNullException(nameof(owner));
         Self = self;
         Parent = parent;
         Path = path ?? $"/anonymous_{Self.ActorId}";

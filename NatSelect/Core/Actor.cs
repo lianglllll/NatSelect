@@ -10,6 +10,7 @@ public abstract class Actor : IAsyncDisposable
     private readonly ChannelReader<IAMessage> _reader;
     private readonly ChannelWriter<IAMessage> _writer;
     private bool _shouldStopDueToError;
+    private volatile bool _disposed;
     protected ILogger Log { get; }
 
     protected ActorContext Context { get; }
@@ -79,6 +80,9 @@ public abstract class Actor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         _writer.TryComplete();
         await Context.DisposeAsync().ConfigureAwait(false);
     }

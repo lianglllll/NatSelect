@@ -25,12 +25,15 @@ public readonly struct ActorRef : IEquatable<ActorRef>
     public ActorRef(ulong nodeId, ulong actorId)
     {
         if (actorId == 0) throw new ArgumentException("Actor ID must be non-zero", nameof(actorId));
-        // NodeId 可以为 0 吗？通常本地节点启动时会分配一个非零 NodeId
-        // 如果允许 0 代表“当前节点”，则逻辑需特殊处理。建议 NodeId 也全局唯一且非零。
 
         NodeId = nodeId;
         ActorId = actorId;
     }
+
+    /// <summary>
+    /// 私有构造：仅用于创建 Invalid 哨兵值
+    /// </summary>
+    private ActorRef(bool _) { NodeId = 0; ActorId = 0; }
 
     /// <summary>
     /// 判断是否是本地 Actor
@@ -40,7 +43,7 @@ public readonly struct ActorRef : IEquatable<ActorRef>
     /// <summary>
     /// 无效引用 (用于空值判断)
     /// </summary>
-    public static ActorRef Invalid => new(0, 0);
+    public static readonly ActorRef Invalid = new(false);
 
     public bool IsValid => ActorId != 0;
 
