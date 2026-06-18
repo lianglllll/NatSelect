@@ -1,4 +1,7 @@
 ﻿using System.Collections.Concurrent;
+using NatSelect.Config.Template;
+using NatSelect.Network;
+using Serilog;
 
 namespace NatSelect.Core;
 
@@ -12,21 +15,45 @@ public sealed class LocalActorSystem : IActorSystem
     // 索引：target ActorId -> (watcher ActorId -> true)，方便快速查找谁在监视某个目标
     private readonly ConcurrentDictionary<ulong, ConcurrentDictionary<ulong, bool>> _watchersByTarget = new();
     private ulong _nextActorId = 1;
+    private readonly ActorSystemConfig _config;
+    private readonly ActorScheduler _scheduler;
+
+    public ulong NodeId { get; }
+
+    public LocalActorSystem(ulong nodeId, ActorSystemConfig config)
+    {
+        NodeId = nodeId;
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+
+        // 初始化调度器
+        _scheduler = new ActorScheduler();
+        _scheduler.Start(config.WorkerThreads);
+    }
 
     public ActorRef SpawnActor<T>(ActorContext parent, string name, params object[] args)
         where T : Actor
     {
-        // 生成唯一ID（含简单节点标识：高32位=0表示本节点）
-        var id = ((ulong)0 << 32) | (ulong)Interlocked.Increment(ref _nextActorId);
+        // 生成 Actor ID（节点内唯一，简单递增）
+        var actorId = (ulong)Interlocked.Increment(ref _nextActorId);
         var path = $"{parent.Path}/{name}";
-        var selfRef = new ActorRef(0, id);
+        var selfRef = new ActorRef(NodeId, actorId);
 
         // 创建Context和Actor
-        var context = new ActorContext(this, selfRef, parent.Self, path);
-        var actor = (Actor)Activator.CreateInstance(typeof(T), context, args)!;
+        var context = new ActorContext(this, selfRef, parent.Self, path, name);
+
+        // 构建构造函数参数：context + args
+        var ctorArgs = new object[1 + args.Length];
+        ctorArgs[0] = context;
+        if (args.Length > 0)
+            Array.Copy(args, 0, ctorArgs, 1, args.Length);
+
+        var actor = (Actor)Activator.CreateInstance(typeof(T), ctorArgs)!;
+
+        // 注入调度器
+        actor.Scheduler = _scheduler;
 
         // 注册到系统
-        _actors.TryAdd(id, actor);
+        _actors.TryAdd(actorId, actor);
         return selfRef;
     }
 
@@ -67,7 +94,95 @@ public sealed class LocalActorSystem : IActorSystem
         }
     }
     public int GetTotalActorCount() => _actors.Count;
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    #region 诊断接口
+
+    /// <summary>
+    /// 获取所有顶层 Actor 的信息树
+    /// </summary>
+    public IReadOnlyList<ActorInfo> GetActorTree()
+    {
+        var result = new List<ActorInfo>();
+        foreach (var actor in _actors.Values)
+        {
+            // 返回所有 Actor（简化版，显示完整的树）
+            result.Add(BuildActorInfo(actor));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 获取指定 Actor 的信息
+    /// </summary>
+    public ActorInfo? GetActorInfo(ActorRef actorRef)
+    {
+        if (_actors.TryGetValue(actorRef.ActorId, out var actor))
+        {
+            return BuildActorInfo(actor);
+        }
+        return null;
+    }
+
+    private ActorInfo BuildActorInfo(Actor actor)
+    {
+        var children = new List<ActorInfo>();
+        foreach (var childRef in actor.Context.Children.Values)
+        {
+            if (_actors.TryGetValue(childRef.ActorId, out var childActor))
+            {
+                children.Add(BuildActorInfo(childActor));
+            }
+        }
+
+        return new ActorInfo(
+            Self: actor.Context.Self,
+            Name: actor.Context.Name,
+            Path: actor.Context.Path,
+            State: actor.Context.State,
+            MailboxSize: 0, // TODO: 可以从 Channel 获取
+            Children: children
+        );
+    }
+
+    #endregion
+
+    /// <summary>
+    /// 发送远程消息（通过 NetworkService 路由）
+    /// </summary>
+    public async ValueTask SendRemoteAsync(ActorRef sender, ActorRef target, IAMessage message)
+    {
+        if (_networkService == null)
+        {
+            Log.Warning("[ActorSystem] Cannot send remote message: NetworkService not connected. Target: {Target}", target);
+            return;
+        }
+        await _networkService.SendRemoteAsync(sender, target, message);
+    }
+
+    /// <summary>
+    /// 注入 NetworkService（引擎启动后调用）
+    /// </summary>
+    public void SetNetworkService(NetworkService networkService)
+    {
+        _networkService = networkService;
+    }
+
+    private NetworkService? _networkService;
+
+    public async ValueTask DisposeAsync()
+    {
+        // 停止调度器
+        await _scheduler.StopAsync();
+
+        // 停止所有 Actor
+        foreach (var actor in _actors.Values)
+        {
+            await actor.DisposeAsync();
+        }
+        _actors.Clear();
+
+        Log.Information("[ActorSystem] Disposed");
+    }
 
     private void NotifyWatchers(ActorRef target)
     {

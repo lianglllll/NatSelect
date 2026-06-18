@@ -1,8 +1,9 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.Sockets;
 using Google.Protobuf;
 using NatSelect.Core;
-using Serilog;
 using NatSelect.Protobuf.Interval;
+using Serilog;
 
 namespace NatSelect.Network
 {
@@ -13,13 +14,25 @@ namespace NatSelect.Network
     /// </summary>
     public sealed class NetworkService : IAsyncDisposable
     {
-        // 1. 远程连接池：NodeId -> TcpConnection (线程安全)
+        // 1. 远程节点连接池：NodeId -> TcpConnection (线程安全)
         private readonly ConcurrentDictionary<ulong, TcpConnection> _remoteConnections = new();
 
-        // 2. 依赖注入
+        // 2. 客户端连接池：ConnectionId -> TcpConnection
+        private readonly ConcurrentDictionary<long, TcpConnection> _clientConnections = new();
+
+        // 3. 依赖注入
         private readonly ulong _localNodeId;
         private readonly IActorSystem _actorSystem;
         private readonly ProtoHelper _protoHelper;
+
+        // 4. TCP 服务端监听器
+        private TcpServerListener? _listener;
+
+        // 5. 上层回调
+        public Func<TcpConnection, ValueTask>? OnClientConnected { get; set; }
+        public Action<TcpConnection>? OnClientDisconnected { get; set; }
+
+        public int ClientConnectionCount => _clientConnections.Count;
 
         public NetworkService(ulong localNodeId, IActorSystem actorSystem, ProtoHelper protoHelper)
         {
@@ -29,6 +42,57 @@ namespace NatSelect.Network
 
             Log.Information("NetworkService initialized on NodeId: {NodeId}", _localNodeId);
         }
+
+        #region TCP 服务端监听
+
+        /// <summary>
+        /// 启动 TCP 监听
+        /// </summary>
+        public async Task StartListenAsync(int port, int maxConnections)
+        {
+            _listener = new TcpServerListener();
+            await _listener.StartAsync(port, maxConnections, OnClientSocketAccepted);
+        }
+
+        private void OnClientSocketAccepted(Socket socket)
+        {
+            var connection = new TcpConnection(
+                socket,
+                onMessageReceived: (connId, msg) => HandleClientMessageAsync(connId, msg),
+                onDisconnected: (connId) => HandleClientDisconnected(connId)
+            );
+
+            var connId = connection.ConnectionId;
+            if (_clientConnections.TryAdd(connId, connection))
+            {
+                connection.Start();
+                Log.Debug("[NetworkService] Client {ConnId} registered", connId);
+
+                // 通知上层
+                OnClientConnected?.Invoke(connection);
+            }
+        }
+
+        private void HandleClientMessageAsync(long connId, Google.Protobuf.IMessage msg)
+        {
+            // 客户端消息处理：由上层通过 OnClientConnected 注册的回调处理
+            // 这里暂时只做日志记录，具体路由由业务层决定
+            Log.Debug("[NetworkService] Received client message from {ConnId}: {Type}", connId, msg.GetType().Name);
+        }
+
+        private void HandleClientDisconnected(long connId)
+        {
+            if (_clientConnections.TryRemove(connId, out var connection))
+            {
+                Log.Debug("[NetworkService] Client {ConnId} disconnected", connId);
+                _listener?.OnConnectionClosed();
+
+                // 通知上层
+                OnClientDisconnected?.Invoke(connection);
+            }
+        }
+
+        #endregion
 
         #region 连接管理 (无锁操作)
 
@@ -47,9 +111,20 @@ namespace NatSelect.Network
             }
         }
 
+        /// <summary>
+        /// 向指定客户端发送消息
+        /// </summary>
+        public void SendToClient(long connId, Google.Protobuf.IMessage message)
+        {
+            if (_clientConnections.TryGetValue(connId, out var connection))
+            {
+                connection.Send(message);
+            }
+        }
+
         #endregion
 
-        #region 远程发送 (本地 -> 远程)
+        #region 远程发送 (本地 -> 远程节点)
 
         /// <summary>
         /// 发送消息到远程节点
@@ -65,13 +140,15 @@ namespace NatSelect.Network
             }
 
             // 2. 构建协议包
+            var payloadType = (ulong)_protoHelper.Type2Seq(message.GetType());
             var envelope = new NatSelectEnvelope
             {
                 SenderNodeId = sender.NodeId,
                 SenderActorId = sender.ActorId,
                 TargetNodeId = target.NodeId,
                 TargetActorId = target.ActorId,
-                Payload = ByteString.CopyFrom(_protoHelper.Serialize(message))
+                Payload = ByteString.CopyFrom(_protoHelper.Serialize(message)),
+                PayloadType = payloadType
             };
 
             // 3. 直接发送 (TcpConnection 内部有 Channel 队列，这里是写入 Channel，非阻塞)
@@ -136,12 +213,27 @@ namespace NatSelect.Network
 
         public async ValueTask DisposeAsync()
         {
+            // 1. 停止监听
+            if (_listener != null)
+            {
+                await _listener.StopAsync();
+            }
+
+            // 2. 关闭所有客户端连接
+            foreach (var conn in _clientConnections.Values)
+            {
+                conn.Close();
+            }
+            _clientConnections.Clear();
+
+            // 3. 关闭所有远程节点连接
             foreach (var conn in _remoteConnections.Values)
             {
                 conn.Close();
             }
             _remoteConnections.Clear();
-            await Task.CompletedTask;
+
+            Log.Information("[NetworkService] Disposed");
         }
     }
 }

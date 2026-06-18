@@ -11,6 +11,11 @@ namespace NatSelect.Core;
 /// </summary>
 public interface IActorSystem : IAsyncDisposable
 {
+    /// <summary>
+    /// 当前节点ID
+    /// </summary>
+    ulong NodeId { get; }
+
     // Actor生命周期
     ActorRef SpawnActor<T>(ActorContext parent, string name, params object[] args) where T : Actor;
     ValueTask StopActorAsync(ActorRef actorRef);
@@ -18,6 +23,9 @@ public interface IActorSystem : IAsyncDisposable
 
     // 消息路由（核心！）
     ValueTask SendAsync(ActorRef target, IAMessage message);
+
+    // 远程消息发送（跨节点通信）
+    ValueTask SendRemoteAsync(ActorRef sender, ActorRef target, IAMessage message);
 
     // 服务注册（游戏高频：匹配服/网关）
     bool RegisterService(string serviceName, ActorRef actorRef);

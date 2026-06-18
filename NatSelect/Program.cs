@@ -1,68 +1,106 @@
-﻿using NatSelect.Config;
-using NatSelect.Config.Template;
+﻿using NatSelect.Core;
 using Serilog;
 
 namespace NatSelect;
 
 public class Program
 {
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
-        // 1. 初始化日志
-        Log.Logger = new LoggerConfiguration()
-            .WriteTo.Console()
-            .CreateLogger();
+        string configPath = args.Length > 0 ? args[0] : "Config/config.yaml";
+
+        await using var engine = new NatSelectEngine(configPath);
+
+        // 注册 Ctrl+C 优雅退出
+        var shutdownCts = new CancellationTokenSource();
+        Console.CancelKeyPress += async (_, e) =>
+        {
+            e.Cancel = true;
+            Log.Information("Ctrl+C detected, shutting down...");
+            await engine.StopAsync();
+            shutdownCts.Cancel();
+        };
 
         try
         {
-            string configPath = args.Length > 0 ? args[0] : "Config/config.yaml";
+            await engine.StartAsync();
 
-            // 2. 加载核心配置 (强类型)
-            var settings = ConfigLoader.Load<ConfigTemplate>(configPath);
+            // ========== Demo: 演示 Actor 系统 ==========
+            await RunDemo(engine);
 
-            // 3. 处理节点名称 -> ID 转换
-            //string nodeName = settings.Node.Name; // "ob_game_1"
-            //ulong nodeId = NodeRegistry.GetId(nodeName); // 转换为数字，例如 182374...
+            Log.Information("Demo completed. Press Ctrl+C to exit.");
 
-            Log.Information("=================================");
-            Log.Information("Server Starting...");
-            //Log.Information("Node Name: {Name}", nodeName);
-            //Log.Information("Node ID  : {Id} (Internal)", nodeId);
-            Log.Information("Port     : {Port}", settings.Network.ListenPort);
-            Log.Information("Workers  : {Threads}", settings.Node.ActorSystem.WorkerThreads);
-            Log.Information("=================================");
-
-            // 4. 演示动态访问 (读取 game_balance)
-            // 假设你想单独加载一个经常变的数值文件，或者直接从 settings.GameBalance 访问
-            if (settings.GameBalance != null)
-            {
-                // 因为 GameBalance 定义为 object，我们需要把它转回 dynamic 或者 Dictionary
-                // 这里为了演示，我们直接重新加载一次动态版，或者你在定义时直接用 dynamic
-                var dynamicConfig = ConfigLoader.LoadDynamic(configPath);
-
-                double expRate = dynamicConfig.game_balance.exp_multiplier;
-                Log.Information("Game Balance - Exp Rate: {Rate}", expRate);
-
-                // 访问列表
-                foreach (var evt in dynamicConfig.game_balance.special_events)
-                {
-                    Log.Information("Active Event: {Event}", evt);
-                }
-            }
-
-            // 5. 初始化你的 Actor System
-            // var system = new ActorSystem(nodeId, settings.Node.ActorSystem);
-
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
+            // 等待关闭信号
+            await Task.Delay(Timeout.Infinite, shutdownCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常关闭
         }
         catch (Exception ex)
         {
-            Log.Fatal(ex, "Server startup failed!");
+            Log.Fatal(ex, "Fatal error!");
         }
-        finally
+
+        Log.Information("NatSelect Engine shutdown complete.");
+    }
+
+    static async Task RunDemo(NatSelectEngine engine)
+    {
+        Log.Information("========== NatSelect Demo Starting ==========");
+
+        // 1. 创建一个 RootActor 作为所有 Actor 的父节点
+        // 由于 LocalActorSystem.SpawnActor 需要 parent，我们用引擎的 ActorSystem 创建一个根上下文
+        var rootContext = new ActorContext(engine.ActorSystem, new ActorRef(engine.NodeId, 999999), null, "/");
+
+        // 2. 创建两个 EchoActor
+        var echo1Ref = engine.ActorSystem.SpawnActor<EchoActor>(rootContext, "echo-1");
+        var echo2Ref = engine.ActorSystem.SpawnActor<EchoActor>(rootContext, "echo-2");
+
+        Log.Information("Created EchoActor 1: {Ref}", echo1Ref);
+        Log.Information("Created EchoActor 2: {Ref}", echo2Ref);
+
+        // 3. 向 echo-1 发送几条消息
+        for (int i = 1; i <= 5; i++)
         {
-            Log.CloseAndFlush();
+            await engine.ActorSystem.SendAsync(echo1Ref, new PingMessage
+            {
+                Sender = echo2Ref, // echo2 发送
+                Text = $"Hello from demo #{i}"
+            });
+
+            await Task.Delay(100); // 稍微延迟，让消息有时间处理
+        }
+
+        // 4. 等待消息处理完成
+        await Task.Delay(500);
+
+        // 5. 打印诊断信息
+        Log.Information("========== Actor System Diagnostics ==========");
+        Log.Information("Total Actors: {Count}", engine.ActorSystem.GetTotalActorCount());
+
+        if (engine.ActorSystem is LocalActorSystem localSystem)
+        {
+            var tree = localSystem.GetActorTree();
+            Log.Information("Actor Tree ({Count} roots):", tree.Count);
+            foreach (var info in tree)
+            {
+                PrintActorInfo(info, "");
+            }
+        }
+
+        Log.Information("========== Demo Complete ==========");
+        Log.Information("(Timers will keep ticking every 3 seconds. Press Ctrl+C to stop.)");
+    }
+
+    static void PrintActorInfo(ActorInfo info, string indent)
+    {
+        Log.Information("{Indent}[{State}] {Name} @ {Path} (children: {ChildCount})",
+            indent, info.State, info.Name, info.Path, info.Children.Count);
+
+        foreach (var child in info.Children)
+        {
+            PrintActorInfo(child, indent + "  ");
         }
     }
 }

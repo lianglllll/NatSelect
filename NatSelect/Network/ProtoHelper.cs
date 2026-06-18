@@ -20,6 +20,39 @@ public class ProtoHelper : Singleton<ProtoHelper>
     {
 
     }
+
+    /// <summary>
+    /// 自动扫描程序集，注册所有带 [ProtoId] 特性的 IMessage 类型
+    /// </summary>
+    public void AutoRegisterAll()
+    {
+        var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+        var types = assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && typeof(IMessage).IsAssignableFrom(t));
+
+        foreach (var type in types)
+        {
+            var attr = type.GetCustomAttributes(typeof(ProtoIdAttribute), false)
+                .FirstOrDefault() as ProtoIdAttribute;
+            if (attr == null) continue;
+
+            int id = attr.Id;
+
+            // 检查重复注册
+            if (m_sequence2type.TryGetValue(id, out var existingType) && existingType != type)
+            {
+                Log.Warning("[ProtoHelper] Proto ID {Id} already registered for {Existing}, skipping {New}",
+                    id, existingType.Name, type.Name);
+                continue;
+            }
+
+            m_sequence2type[id] = type;
+            m_type2sequence[type] = id;
+            Log.Debug("[ProtoHelper] Registered {Type} with ID {Id}", type.Name, id);
+        }
+
+        Log.Information("[ProtoHelper] Auto-registered {Count} proto message types", m_sequence2type.Count);
+    }
     public void UnInit()
     {
 
@@ -103,21 +136,36 @@ public class ProtoHelper : Singleton<ProtoHelper>
     }
 
     /// <summary>
-    /// 序列化 Actor 消息为字节数组
+    /// 序列化 Actor 消息为纯 Protobuf 字节数组（不含长度头，用于 envelope payload）
     /// </summary>
     public byte[] Serialize(IAMessage message)
     {
         if (message is IMessage protoMsg)
-            return IMessageParse2ByteArray(protoMsg);
+            return protoMsg.ToByteArray();
         throw new InvalidOperationException($"Cannot serialize {message.GetType()}: does not implement IMessage");
     }
 
     /// <summary>
-    /// 反序列化字节数据为 Actor 消息
+    /// 反序列化字节数据为 Actor 消息（从 envelope 的 payload_type 获取类型信息）
     /// </summary>
     public IAMessage? Deserialize(ByteString data, ulong payloadType)
     {
-        var msg = ByteArrayParse2IMessage(data.Memory);
+        int typeCode = (int)payloadType;
+        var type = Seq2Type(typeCode);
+        if (type == null)
+        {
+            Log.Error("[ProtoHelper.Deserialize] Unknown payload type: {TypeCode}", typeCode);
+            return null;
+        }
+
+        var desc = type.GetProperty("Descriptor")?.GetValue(type) as MessageDescriptor;
+        if (desc == null)
+        {
+            Log.Error("[ProtoHelper.Deserialize] Cannot get descriptor for type: {Type}", type.Name);
+            return null;
+        }
+
+        var msg = desc.Parser.ParseFrom(data.Memory.Span);
         return msg as IAMessage;
     }
 }
