@@ -13,34 +13,43 @@ NatSelect 是基于 .NET 10.0 的 C# 游戏服务端引擎（对标 Skynet），
 
 ## 项目结构
 
+项目采用双项目架构，符合框架设计原则（引擎是类库，不是 Main 入口）：
+
 ```
 NatSelect/
-├── Common/               # 通用工具 (Singleton, DataStream, BusinessException)
-├── Config/               # YAML 配置加载与热加载
-│   ├── ConfigLoader.cs   # 基础加载
-│   ├── ConfigManager.cs  # 热加载 + 变更通知
-│   └── Template/         # 配置强类型定义
-├── Core/                 # Actor 核心框架 + 引擎
-│   ├── NatSelectEngine.cs   # 引擎统一入口
-│   ├── Actor.cs             # Actor 基类（调度器驱动）
-│   ├── ActorContext.cs      # 上下文（含定时器、子Actor管理）
-│   ├── ActorRef.cs          # 分布式 Actor 引用
-│   ├── ActorScheduler.cs    # Worker 线程池调度器
-│   ├── ActorTimer.cs        # 定时器实现
-│   ├── ActorInfo.cs         # 诊断信息 DTO
-│   ├── IActorSystem.cs      # ActorSystem 接口
-│   ├── LocalActorSystem.cs  # 单机版 ActorSystem 实现
-│   └── IAMessage.cs         # 消息接口体系
-├── Demo/                 # 示例代码
-├── Logger/               # Serilog 结构化日志
-└── Network/              # TCP 网络层
-    ├── NetworkService.cs     # 全局网络管理（客户端 + 远程节点）
-    ├── TcpServerListener.cs  # TCP 服务端监听
-    ├── TcpConnection.cs      # TCP 连接封装
-    ├── LengthFieldDecoder.cs # 粘包拆包解码器
-    ├── ProtoHelper.cs        # Protobuf 序列化/反序列化
-    ├── ProtoIdAttribute.cs   # 协议号标注特性
-    └── Proto/                # .proto 协议文件
+├── NatSelect/              # 引擎核心（类库）
+│   ├── Common/             # 通用工具 (Singleton, DataStream, BusinessException)
+│   ├── Config/             # YAML 配置加载与热加载
+│   │   ├── ConfigLoader.cs # 基础加载
+│   │   ├── ConfigManager.cs # 热加载 + 变更通知
+│   │   └── Template/       # 配置强类型定义
+│   ├── Core/               # Actor 核心框架 + 引擎
+│   │   ├── NatSelectEngine.cs   # 引擎统一入口
+│   │   ├── Actor.cs             # Actor 基类（调度器驱动）
+│   │   ├── ActorContext.cs      # 上下文（含定时器、子Actor管理）
+│   │   ├── ActorRef.cs          # 分布式 Actor 引用
+│   │   ├── ActorScheduler.cs    # Worker 线程池调度器
+│   │   ├── ActorTimer.cs        # 定时器实现
+│   │   ├── ActorInfo.cs         # 诊断信息 DTO
+│   │   ├── IActorSystem.cs      # ActorSystem 接口
+│   │   ├── LocalActorSystem.cs  # 单机版 ActorSystem 实现
+│   │   └── IAMessage.cs         # 消息接口体系
+│   ├── Logger/             # Serilog 结构化日志 (NSLogger)
+│   └── Network/            # TCP 网络层
+│       ├── NetworkService.cs     # 全局网络管理（客户端 + 远程节点）
+│       ├── TcpServerListener.cs  # TCP 服务端监听
+│       ├── TcpConnection.cs      # TCP 连接封装
+│       ├── LengthFieldDecoder.cs # 粘包拆包解码器
+│       ├── ProtoHelper.cs        # Protobuf 序列化/反序列化
+│       ├── ProtoIdAttribute.cs   # 协议号标注特性
+│       └── Proto/                # .proto 协议文件
+├── NatSelectDemo/          # Demo 项目（可执行，命名空间 NatSelectDemo）
+│   ├── Demo/               # ProgramDemo.cs + EchoActor.cs
+│   ├── Program.cs          # Main 入口 + 关闭信号
+│   ├── NatSelectDemo.csproj
+│   ├── run.bat             # 运行脚本（支持 daemon 模式 -d）
+│   └── stop.bat            # 优雅关闭脚本（触发命名事件）
+└── NatSelect.sln           # 解决方案文件（包含两个项目）
 ```
 
 ## 引擎使用（NatSelectEngine）
@@ -298,13 +307,19 @@ NSLogger.Shutdown();  // 程序退出时
 ## 构建与运行
 
 ```bash
-# 使用构建脚本（推荐，规避 PowerShell 策略限制）
-build.bat              # Debug 构建
-build.bat Release      # Release 构建
+# 编译整个解决方案
+dotnet build
+
+# 运行（在 NatSelectDemo 目录下，自动编译）
+cd NatSelectDemo
+run.bat                # 前台运行（默认 Debug）
+run.bat Debug -d       # 后台 daemon 模式
+
+# 优雅关闭（配合 run.bat 使用）
+stop.bat
 
 # 或直接使用 dotnet CLI
-dotnet build
-dotnet run --project NatSelect -- [config.yaml路径]   # 默认 Config/config.yaml
+dotnet run --project NatSelectDemo -- [config.yaml路径]
 ```
 
 ## 新增模块 Checklist

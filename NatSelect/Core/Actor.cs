@@ -16,9 +16,9 @@ public abstract class Actor : IAsyncDisposable
     protected ILogger Log { get; }
 
     /// <summary>
-    /// Actor 上下文（internal 供引擎内部访问）
+    /// Actor 上下文
     /// </summary>
-    internal ActorContext Context { get; }
+    public ActorContext Context { get; }
 
     // 调度器引用（由 ActorSystem 注入）
     internal ActorScheduler? Scheduler { get; set; }

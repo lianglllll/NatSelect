@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NatSelect\NatSelect.csproj" />
+  </ItemGroup>
+
+  <!-- 从引擎项目复制配置文件到输出目录 -->
+  <ItemGroup>
+    <None Include="..\NatSelect\Config\config.yaml" Link="Config\config.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
