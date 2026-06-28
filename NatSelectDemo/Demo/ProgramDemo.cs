@@ -1,3 +1,4 @@
+using NatSelect.Auth;
 using NatSelect.Core;
 using Serilog;
 
@@ -42,10 +43,36 @@ public static class ProgramDemo
         // 4. 等待消息处理完成
         await Task.Delay(500);
 
-        // 5. 打印诊断信息
+        // 5. 演示用户认证功能
+        await RunAuthDemoAsync(engine, rootContext);
+
+        // 6. 打印诊断信息
         PrintDiagnostics(engine);
 
         Log.Information("========== Demo Complete ==========");
+    }
+
+    private static async Task RunAuthDemoAsync(NatSelectEngine engine, ActorContext rootContext)
+    {
+        Log.Information("========== Auth Demo Starting ==========");
+
+        var authRef = engine.ActorSystem.SpawnActor<AuthActor>(rootContext, "auth");
+        Log.Information("Created AuthActor: {Ref}", authRef);
+
+        var demoRef = engine.ActorSystem.SpawnActor<AuthDemoActor>(rootContext, "auth-demo", authRef);
+        Log.Information("Created AuthDemoActor: {Ref}", demoRef);
+
+        await engine.ActorSystem.SendAsync(authRef, new RegisterRequest
+        {
+            Sender = demoRef,
+            Username = "testuser",
+            Password = "testpass123",
+            Email = "test@example.com"
+        });
+
+        await Task.Delay(1000);
+
+        Log.Information("========== Auth Demo Complete ==========");
     }
 
     private static void PrintDiagnostics(NatSelectEngine engine)
