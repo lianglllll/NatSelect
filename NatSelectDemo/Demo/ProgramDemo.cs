@@ -2,7 +2,7 @@ using NatSelect.Auth;
 using NatSelect.Core;
 using Serilog;
 
-namespace NatSelectDemo;
+namespace NatSelectDemo.Demo;
 
 /// <summary>
 /// 引擎演示程序

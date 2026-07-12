@@ -12,16 +12,21 @@ namespace NatSelect.Core;
 /// </summary>
 public sealed class NatSelectEngine : IAsyncDisposable
 {
-    public enum EngineState { Stopped, Starting, Running, Stopping }
+    public enum EngineState { 
+        Stopped, 
+        Starting, 
+        Running, 
+        Stopping 
+    }
 
     private EngineState _state = EngineState.Stopped;
     private readonly string _configPath;
 
     // 核心组件
+    public ulong NodeId { get; private set; }
     public ConfigTemplate Config { get; private set; } = new();
     public IActorSystem ActorSystem { get; private set; } = null!;
     public NetworkService? NetworkService { get; private set; }
-    public ulong NodeId { get; private set; }
 
     // 上层回调：客户端连接/断开事件
     public Func<TcpConnection, ValueTask>? OnClientConnected { get; set; }
@@ -151,9 +156,8 @@ public sealed class NatSelectEngine : IAsyncDisposable
     {
         if (!File.Exists(_configPath))
         {
-            Log.Warning("Config file not found at {Path}, using defaults.", _configPath);
-            Config = new ConfigTemplate();
-            return;
+            Log.Error("Config file not found at {Path}!", _configPath);
+            throw new FileNotFoundException($"配置文件未找到: {_configPath}");
         }
 
         Config = ConfigLoader.Load<ConfigTemplate>(_configPath);

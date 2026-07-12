@@ -21,6 +21,11 @@ public class ProtoHelper : Singleton<ProtoHelper>
 
     }
 
+    public void UnInit()
+    {
+
+    }
+
     /// <summary>
     /// 自动扫描程序集，注册所有带 [ProtoId] 特性的 IMessage 类型
     /// </summary>
@@ -53,10 +58,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
 
         Log.Information("[ProtoHelper] Auto-registered {Count} proto message types", m_sequence2type.Count);
     }
-    public void UnInit()
-    {
 
-    }
     public bool Register<T>(int id) where T : IMessage
     {
         Type type = typeof(T);
@@ -64,6 +66,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
         m_type2sequence[type] = id;
         return true;
     }
+
     public int Type2Seq(Type type)
     {
         if (m_type2sequence.ContainsKey(type))
@@ -76,6 +79,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
             return -1;
         }
     }
+
     public Type Seq2Type(int code)
     {
         if (m_sequence2type.ContainsKey(code))
@@ -88,6 +92,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
             return null;
         }
     }
+
     public IMessage ByteArrayParse2IMessage(ReadOnlyMemory<byte> data)
     {
         /*            ushort typeCode = _GetUShort(data, 0);
@@ -111,6 +116,7 @@ public class ProtoHelper : Singleton<ProtoHelper>
         // 使用Span解析
         return desc.Parser.ParseFrom(span.Slice(2));
     }
+    
     public byte[] IMessageParse2ByteArray(IMessage message)
     {
         //获取imessage类型所对应的编号，网络传输我们只传输编号

@@ -8,9 +8,7 @@ using Serilog;
 namespace NatSelect.Network
 {
     /// <summary>
-    /// 全局网络管理服务 (非 Actor!)
-    /// 职责：维护节点连接池，处理协议编解码，直接路由消息到 ActorSystem
-    /// 特点：无锁高并发，无邮箱排队延迟
+    /// 全局网络网关 — 连接池 + 协议编解码 + 消息路由中枢。
     /// </summary>
     public sealed class NetworkService : IAsyncDisposable
     {

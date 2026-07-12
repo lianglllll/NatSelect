@@ -1,6 +1,6 @@
 using System.Threading;
 using NatSelect.Core;
-using NatSelectDemo;
+using NatSelectDemo.Demo;
 using Serilog;
 
 namespace NatSelectDemo;
