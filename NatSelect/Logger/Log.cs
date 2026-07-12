@@ -19,6 +19,9 @@ public static class NSLogger
         {
             if (_logger != null) return;
 
+            // 启动时间戳，用于日志文件名
+            string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+
             _logger = new LoggerConfiguration()
                 // ===== 全局上下文注入 =====
                 .Enrich.WithProperty("Service", serviceName)
@@ -32,7 +35,7 @@ public static class NSLogger
 
                 // ===== 文件输出（生产环境核心）=====
                 .WriteTo.Async(a => a.File(
-                    Path.Combine(logDirectory, "game-{Date}.log"),
+                    Path.Combine(logDirectory, $"game-{timestamp}.log"),
                     outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}",
                     rollingInterval: RollingInterval.Day,
                     retainedFileCountLimit: 30, // 保留30天
@@ -41,13 +44,13 @@ public static class NSLogger
 
                 // ===== 错误日志单独文件（运维刚需）=====
                 .WriteTo.Async(a => a.File(
-                    Path.Combine(logDirectory, "errors-{Date}.log"),
+                    Path.Combine(logDirectory, $"errors-{timestamp}.log"),
                     restrictedToMinimumLevel: LogEventLevel.Error,
                     rollingInterval: RollingInterval.Day))
 
                 // ===== 关键：结构化JSON输出（对接ELK）=====
                 .WriteTo.Async(a => a.File(
-                    path: Path.Combine(logDirectory, "structured-{Date}.json"),
+                    path: Path.Combine(logDirectory, $"structured-{timestamp}.json"),
                     formatter: new Serilog.Formatting.Json.JsonFormatter(),
                     rollingInterval: RollingInterval.Day,
                     restrictedToMinimumLevel: LogEventLevel.Information,
