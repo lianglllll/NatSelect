@@ -12,6 +12,8 @@ public abstract class Actor : IAsyncDisposable
     private bool _shouldStopDueToError;
     private volatile bool _disposed;
     private int _scheduled = 0; // 0 = not scheduled, 1 = scheduled (防止重复入队)
+    private int _processing = 0; // 0 = 空闲, 1 = 执行中（防止并发执行流）
+    private volatile Action? _pendingContinuation; // 挂起协程的续延（同一 Actor 至多一个）
 
     protected ILogger Log { get; }
 
@@ -59,8 +61,9 @@ public abstract class Actor : IAsyncDisposable
 
         await _writer.WriteAsync(msg);
 
-        // 通知调度器此 Actor 有新消息
-        Scheduler?.Schedule(this);
+        // 协程挂起中不入队：恢复后由 Worker 收尾兜底重新入队
+        if (!HasPendingContinuation)
+            Scheduler?.Schedule(this);
     }
 
     /// <summary>
@@ -79,59 +82,117 @@ public abstract class Actor : IAsyncDisposable
         Interlocked.Exchange(ref _scheduled, 0);
     }
 
+    /// <summary>
+    /// 尝试开始执行（原子操作，防止并发执行流）
+    /// </summary>
+    internal bool TryBeginProcessing()
+    {
+        return Interlocked.CompareExchange(ref _processing, 1, 0) == 0;
+    }
+
+    /// <summary>
+    /// 结束执行，释放执行流独占权
+    /// </summary>
+    internal void EndProcessing()
+    {
+        Interlocked.Exchange(ref _processing, 0);
+    }
+
+    /// <summary>
+    /// 是否存在挂起的协程续延
+    /// </summary>
+    public bool HasPendingContinuation => _pendingContinuation != null;
+
+    /// <summary>
+    /// 取出挂起协程的续延并清空槽位（由 Worker 调用）
+    /// </summary>
+    internal bool TryTakeContinuation(out Action continuation)
+    {
+        var pending = _pendingContinuation;
+        if (pending == null)
+        {
+            continuation = null!;
+            return false;
+        }
+        _pendingContinuation = null;
+        continuation = pending;
+        return true;
+    }
+
+    /// <summary>
+    /// 存储协程续延（由 ActorYieldAwaitable 在挂起点调用，运行在 Worker 线程）
+    /// 包装异常处理：恢复段异常同样走 HandleError，不击穿 Worker
+    /// </summary>
+    internal void StoreContinuation(Action rawContinuation, Action onSuspend)
+    {
+        _pendingContinuation = () =>
+        {
+            try
+            {
+                rawContinuation();
+            }
+            catch (OperationCanceledException)
+            {
+                // Actor 销毁引发的取消，正常退出
+            }
+            catch (Exception ex)
+            {
+                HandleError(ex, null);
+            }
+        };
+        onSuspend();
+    }
+
+    /// <summary>
+    /// 尝试从邮箱取一条消息（由 Worker 调用，邮箱为单消费者）
+    /// </summary>
+    internal bool TryReadMessage(out IAMessage msg) => _reader.TryRead(out msg!);
+
     protected abstract ValueTask OnReceiveAsync(IAMessage msg);
 
     /// <summary>
-    /// 处理一条消息（由调度器调用）
+    /// 分发一条消息（由 Worker 调用，同步段在 Worker 线程执行）
+    /// 业务协程挂起时续延存入 _pendingContinuation，由 Worker 检测
     /// </summary>
-    /// <returns>true = 还有更多消息, false = 邮箱已空或已停止</returns>
-    internal async ValueTask<bool> ProcessOneMessageAsync()
+    internal void DispatchMessage(IAMessage msg)
     {
-        if (_disposed || _shouldStopDueToError)
-        {
-            ClearScheduled();
-            return false;
-        }
-
-        if (!await _reader.WaitToReadAsync())
-        {
-            ClearScheduled();
-            return false;
-        }
-
-        if (!_reader.TryRead(out var msg))
-        {
-            ClearScheduled();
-            return false;
-        }
-
-        // 收到停止指令，优雅退出
-        if (msg is ISystemMessage sysMsg && sysMsg is SystemStopMessage)
-        {
-            await Context.DisposeAsync();
-            _disposed = true;
-            ClearScheduled();
-            return false;
-        }
-
+        ValueTask task;
         try
         {
-            await OnReceiveAsync(msg).ConfigureAwait(false);
+            task = DispatchMessageAsync(msg);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
         }
         catch (Exception ex)
         {
             HandleError(ex, msg);
-            if (_shouldStopDueToError)
-            {
-                ClearScheduled();
-                return false;
-            }
+            return;
         }
 
-        ClearScheduled();
+        if (HasPendingContinuation || task.IsCompleted) return;
 
-        // 返回是否还有消息
-        return _reader.TryPeek(out _);
+        Log.Error("[Actor] {Path} awaits a non-engine awaitable; coroutine escaped scheduler", Context.Path);
+    }
+
+    private ValueTask DispatchMessageAsync(IAMessage msg)
+    {
+        switch (msg)
+        {
+            case SystemStopMessage:
+                return StopAsync();
+            case TimerTickMessage tick:
+                return Context.ExecuteTimerAsync(tick.TimerId);
+            default:
+                return OnReceiveAsync(msg);
+        }
+    }
+
+    private async ValueTask StopAsync()
+    {
+        await Context.DisposeAsync();
+        _disposed = true;
     }
 
     /// <summary>
@@ -152,6 +213,13 @@ public abstract class Actor : IAsyncDisposable
                 return;
             }
 
+            // 定时器到期：在调度上下文中执行回调
+            if (msg is TimerTickMessage tick)
+            {
+                await Context.ExecuteTimerAsync(tick.TimerId);
+                continue;
+            }
+
             try
             {
                 await OnReceiveAsync(msg).ConfigureAwait(false);
@@ -164,7 +232,7 @@ public abstract class Actor : IAsyncDisposable
         }
     }
 
-    protected virtual void HandleError(Exception ex, IAMessage msg)
+    protected virtual void HandleError(Exception ex, IAMessage? msg)
     {
         // 简化版：业务异常仅记录，系统异常标记停止
         if (ex is BusinessException || ex is OperationCanceledException)
@@ -185,6 +253,8 @@ public abstract class Actor : IAsyncDisposable
         _disposed = true;
 
         _writer.TryComplete();
+        // 断开挂起协程引用（状态机由 Task 基础设施持有，可被 GC）
+        _pendingContinuation = null;
         await Context.DisposeAsync().ConfigureAwait(false);
     }
 }

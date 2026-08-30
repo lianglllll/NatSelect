@@ -46,7 +46,10 @@ public static class ProgramDemo
         // 5. 演示用户认证功能
         await RunAuthDemoAsync(engine, rootContext);
 
-        // 6. 打印诊断信息
+        // 6. 演示协程原语（挂起不占 Worker，恢复经大队列调度）
+        await RunCoroutineDemoAsync(engine, rootContext, echo1Ref);
+
+        // 7. 打印诊断信息
         PrintDiagnostics(engine);
 
         Log.Information("========== Demo Complete ==========");
@@ -75,6 +78,39 @@ public static class ProgramDemo
         Log.Information("========== Auth Demo Complete ==========");
     }
 
+    private static async Task RunCoroutineDemoAsync(NatSelectEngine engine, ActorContext rootContext, ActorRef echoRef)
+    {
+        Log.Information("========== Coroutine Demo Starting ==========");
+
+        // 创建 20 个协程 Actor（超过 Worker 数，验证挂起不阻塞调度）
+        var flowRefs = new List<ActorRef>();
+        for (int i = 0; i < 20; i++)
+        {
+            flowRefs.Add(engine.ActorSystem.SpawnActor<CoroutineDemoActor>(rootContext, $"flow-{i}"));
+        }
+
+        foreach (var flowRef in flowRefs)
+        {
+            await rootContext.SendAsync(flowRef, new RunFlow());
+        }
+
+        // 挂起期间 EchoActor 应正常处理（旧模型下 16 个挂起即停摆）
+        await Task.Delay(200);
+        for (int i = 1; i <= 3; i++)
+        {
+            await engine.ActorSystem.SendAsync(echoRef, new PingMessage
+            {
+                Text = $"during-suspension #{i}"
+            });
+            await Task.Delay(200);
+        }
+
+        // 等待所有协程流程完成
+        await Task.Delay(2500);
+
+        Log.Information("========== Coroutine Demo Complete ==========");
+    }
+
     private static void PrintDiagnostics(NatSelectEngine engine)
     {
         Log.Information("========== Actor System Diagnostics ==========");
@@ -85,21 +121,21 @@ public static class ProgramDemo
             var tree = localSystem.GetActorTree();
             Log.Information("Actor Tree ({Count} roots):", tree.Count);
 
-            foreach (var info in tree)
+            foreach (var snapshot in tree)
             {
-                PrintActorInfo(info, "");
+                PrintActorSnapshot(snapshot, "");
             }
         }
     }
 
-    private static void PrintActorInfo(ActorInfo info, string indent)
+    private static void PrintActorSnapshot(ActorSnapshot snapshot, string indent)
     {
         Log.Information("{Indent}[{State}] {Name} @ {Path} (children: {ChildCount})",
-            indent, info.State, info.Name, info.Path, info.Children.Count);
+            indent, snapshot.State, snapshot.Name, snapshot.Path, snapshot.Children.Count);
 
-        foreach (var child in info.Children)
+        foreach (var child in snapshot.Children)
         {
-            PrintActorInfo(child, indent + "  ");
+            PrintActorSnapshot(child, indent + "  ");
         }
     }
 }

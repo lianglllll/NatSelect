@@ -54,24 +54,9 @@ public sealed class ActorScheduler : IAsyncDisposable
             try
             {
                 var actor = await reader.ReadAsync(_cts.Token);
-
                 if (actor.IsDisposed) continue;
 
-                // 处理最多 N 条消息，然后让出
-                int processed = 0;
-                while (processed < MaxMessagesPerSlice && !actor.IsDisposed)
-                {
-                    bool hasMore = await actor.ProcessOneMessageAsync();
-                    processed++;
-
-                    if (!hasMore) break;
-                }
-
-                // 如果还有消息，重新放入队列
-                if (!actor.IsDisposed && actor.HasPendingMessages)
-                {
-                    Schedule(actor);
-                }
+                ProcessActor(actor);
             }
             catch (OperationCanceledException)
             {
@@ -84,6 +69,47 @@ public sealed class ActorScheduler : IAsyncDisposable
         }
 
         Log.Debug("[ActorScheduler] Worker {Id} stopped", workerId);
+    }
+
+    /// <summary>
+    /// 推进单个 Actor：优先恢复挂起协程，否则消费邮箱消息
+    /// </summary>
+    private void ProcessActor(Actor actor)
+    {
+        actor.ClearScheduled();
+
+        // 其他 Worker 正在执行该 Actor：放回稍后重试
+        if (!actor.TryBeginProcessing())
+        {
+            Schedule(actor);
+            return;
+        }
+
+        // 推进预算：协程恢复一次即交还，同步消息可批量处理
+        int budget = MaxMessagesPerSlice;
+        while (budget-- > 0 && !actor.IsDisposed)
+        {
+            // 1. 优先推进挂起协程（恢复条件已满足才会在队列中）
+            if (actor.TryTakeContinuation(out var continuation))
+            {
+                continuation();
+                break;
+            }
+
+            // 2. 无挂起协程：消费邮箱消息（同步段在 Worker 线程执行）
+            if (!actor.TryReadMessage(out var msg)) break;
+
+            actor.DispatchMessage(msg);
+            if (actor.HasPendingContinuation) break;
+        }
+
+        actor.EndProcessing();
+
+        // 挂起中的 Actor 不重新入队（由挂起动作的恢复机制负责触发）
+        if (!actor.IsDisposed && !actor.HasPendingContinuation && actor.HasPendingMessages)
+        {
+            Schedule(actor);
+        }
     }
 
     /// <summary>

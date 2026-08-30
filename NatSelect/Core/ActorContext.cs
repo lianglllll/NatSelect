@@ -20,6 +20,11 @@ public sealed class ActorContext : IAsyncDisposable
     public string Path { get; }
     public ActorState State => m_state;
 
+    /// <summary>
+    /// 所属 Actor（由 ActorSystem 在 Spawn 时注入，供协程原语回写续延）
+    /// </summary>
+    internal Actor? Owner { get; set; }
+
     public ActorContext(IActorSystem system, ActorRef self, ActorRef? parent = null, string? path = null, string? name = null)
     {
         m_system = system ?? throw new ArgumentNullException(nameof(system));
@@ -79,21 +84,22 @@ public sealed class ActorContext : IAsyncDisposable
 
     /// <summary>
     /// 创建定时器
+    /// 到期时向自身邮箱投递 TimerTickMessage，回调由调度器串行执行
     /// </summary>
     /// <param name="intervalMs">间隔毫秒</param>
-    /// <param name="callback">回调</param>
+    /// <param name="callback">回调（在 Actor 调度上下文中执行，与消息处理串行）</param>
     /// <param name="repeat">是否循环</param>
     /// <returns>定时器ID</returns>
     public int SetTimer(int intervalMs, Func<ValueTask> callback, bool repeat = false)
     {
         var id = Interlocked.Increment(ref m_nextTimerId);
-        var timer = new ActorTimer(id, intervalMs, repeat, callback);
+        var timer = new ActorTimer(id, intervalMs, repeat, callback, m_system, Self);
         m_timers.TryAdd(id, timer);
         return id;
     }
 
     /// <summary>
-    /// 取消定时器
+    /// 取消定时器（已投递但未执行的到期消息会被自动跳过）
     /// </summary>
     public async ValueTask CancelTimer(int timerId)
     {
@@ -104,11 +110,66 @@ public sealed class ActorContext : IAsyncDisposable
     }
 
     /// <summary>
-    /// 一次性延迟执行
+    /// 一次性延迟执行（回调在 Actor 调度上下文中执行）
     /// </summary>
     public int ScheduleOnce(int delayMs, Func<ValueTask> callback)
     {
         return SetTimer(delayMs, callback, repeat: false);
+    }
+
+    /// <summary>
+    /// 执行定时器到期回调（由 Actor 基类在调度上下文中调用）
+    /// 一次性定时器执行后自动移除并释放
+    /// </summary>
+    internal async ValueTask ExecuteTimerAsync(int timerId)
+    {
+        if (!m_timers.TryGetValue(timerId, out var timer)) return; // 已被取消
+
+        try
+        {
+            await timer.ExecuteCallbackAsync();
+        }
+        finally
+        {
+            if (!timer.IsRepeating)
+            {
+                m_timers.TryRemove(timerId, out _);
+                await timer.DisposeAsync();
+            }
+        }
+    }
+
+    #endregion
+
+    #region 协程原语
+
+    /// <summary>
+    /// 显式让出执行权：挂起协程并立即重新入队，下轮由 Worker 恢复
+    /// </summary>
+    public ActorYieldAwaitable YieldAsync()
+    {
+        var owner = Owner ?? throw new InvalidOperationException("YieldAsync requires an owning actor");
+        return new ActorYieldAwaitable(owner, () => owner.Scheduler?.Schedule(owner));
+    }
+
+    /// <summary>
+    /// 延迟指定毫秒后恢复（挂起期间不占 Worker）
+    /// </summary>
+    public ActorYieldAwaitable DelayAsync(int delayMs)
+    {
+        if (delayMs < 0)
+            throw new ArgumentOutOfRangeException(nameof(delayMs), "delayMs must be non-negative");
+
+        var owner = Owner ?? throw new InvalidOperationException("DelayAsync requires an owning actor");
+        return new ActorYieldAwaitable(owner, () =>
+        {
+            Timer? timer = null;
+            timer = new Timer(_ =>
+            {
+                timer!.Dispose();
+                owner.Scheduler?.Schedule(owner);
+            }, null, delayMs, Timeout.Infinite);
+        });
     }
 
     #endregion

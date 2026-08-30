@@ -49,8 +49,9 @@ public sealed class LocalActorSystem : IActorSystem
 
         var actor = (Actor)Activator.CreateInstance(typeof(T), ctorArgs)!;
 
-        // 注入调度器
+        // 注入调度器与协程归属（协程原语需要回写续延到 Actor）
         actor.Scheduler = _scheduler;
+        context.Owner = actor;
 
         // 注册到系统
         _actors.TryAdd(actorId, actor);
@@ -98,43 +99,43 @@ public sealed class LocalActorSystem : IActorSystem
     #region 诊断接口
 
     /// <summary>
-    /// 获取所有顶层 Actor 的信息树
+    /// 获取所有顶层 Actor 的快照树
     /// </summary>
-    public IReadOnlyList<ActorInfo> GetActorTree()
+    public IReadOnlyList<ActorSnapshot> GetActorTree()
     {
-        var result = new List<ActorInfo>();
+        var result = new List<ActorSnapshot>();
         foreach (var actor in _actors.Values)
         {
             // 返回所有 Actor（简化版，显示完整的树）
-            result.Add(BuildActorInfo(actor));
+            result.Add(BuildActorSnapshot(actor));
         }
         return result;
     }
 
     /// <summary>
-    /// 获取指定 Actor 的信息
+    /// 获取指定 Actor 的快照
     /// </summary>
-    public ActorInfo? GetActorInfo(ActorRef actorRef)
+    public ActorSnapshot? GetActorSnapshot(ActorRef actorRef)
     {
         if (_actors.TryGetValue(actorRef.ActorId, out var actor))
         {
-            return BuildActorInfo(actor);
+            return BuildActorSnapshot(actor);
         }
         return null;
     }
 
-    private ActorInfo BuildActorInfo(Actor actor)
+    private ActorSnapshot BuildActorSnapshot(Actor actor)
     {
-        var children = new List<ActorInfo>();
+        var children = new List<ActorSnapshot>();
         foreach (var childRef in actor.Context.Children.Values)
         {
             if (_actors.TryGetValue(childRef.ActorId, out var childActor))
             {
-                children.Add(BuildActorInfo(childActor));
+                children.Add(BuildActorSnapshot(childActor));
             }
         }
 
-        return new ActorInfo(
+        return new ActorSnapshot(
             Self: actor.Context.Self,
             Name: actor.Context.Name,
             Path: actor.Context.Path,

@@ -15,11 +15,11 @@ public enum ActorState
 /// <summary>
 /// Actor 状态快照（只读，用于诊断）
 /// </summary>
-public record ActorInfo(
+public record ActorSnapshot(
     ActorRef Self,
     string Name,
     string Path,
     ActorState State,
     int MailboxSize,
-    IReadOnlyList<ActorInfo> Children
+    IReadOnlyList<ActorSnapshot> Children
 );
