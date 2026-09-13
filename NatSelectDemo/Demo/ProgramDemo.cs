@@ -130,8 +130,11 @@ public static class ProgramDemo
 
     private static void PrintActorSnapshot(ActorSnapshot snapshot, string indent)
     {
-        Log.Information("{Indent}[{State}] {Name} @ {Path} (children: {ChildCount})",
-            indent, snapshot.State, snapshot.Name, snapshot.Path, snapshot.Children.Count);
+        Log.Information("{Indent}[{State}] {Name} @ {Path} (mailbox: {MailboxSize}/{MailboxCapacity}, dropped: {Dropped}, mergedTicks: {Merged}, children: {ChildCount})",
+            indent, snapshot.State, snapshot.Name, snapshot.Path,
+            snapshot.MailboxSize, snapshot.MailboxCapacity,
+            snapshot.DroppedMessageCount, snapshot.MergedTickCount,
+            snapshot.Children.Count);
 
         foreach (var child in snapshot.Children)
         {

@@ -9,11 +9,17 @@ public abstract class Actor : IAsyncDisposable
 {
     private readonly ChannelReader<IAMessage> _reader;
     private readonly ChannelWriter<IAMessage> _writer;
-    private bool _shouldStopDueToError;
+    private readonly int _mailboxCapacity;
     private volatile bool _disposed;
     private int _scheduled = 0; // 0 = not scheduled, 1 = scheduled (防止重复入队)
     private int _processing = 0; // 0 = 空闲, 1 = 执行中（防止并发执行流）
     private volatile Action? _pendingContinuation; // 挂起协程的续延（同一 Actor 至多一个）
+    private int _droppedMessageCount;
+    private int _mergedTickCount;
+
+    // 调度上下文标记：引擎 awaitable 只能在 Worker 调度该 Actor 期间被 await，
+    // 逃逸到线程池的协程再次 await 引擎原语时会立即失败
+    private static readonly AsyncLocal<Actor?> s_dispatchContext = new();
 
     protected ILogger Log { get; }
 
@@ -31,6 +37,26 @@ public abstract class Actor : IAsyncDisposable
     public bool IsDisposed => _disposed;
 
     /// <summary>
+    /// 邮箱当前积压消息数
+    /// </summary>
+    public int MailboxSize => _reader.Count;
+
+    /// <summary>
+    /// 邮箱容量
+    /// </summary>
+    public int MailboxCapacity => _mailboxCapacity;
+
+    /// <summary>
+    /// 因邮箱满被丢弃的消息总数
+    /// </summary>
+    public int DroppedMessageCount => Volatile.Read(ref _droppedMessageCount);
+
+    /// <summary>
+    /// 被合并的定时器到期消息总数
+    /// </summary>
+    public int MergedTickCount => Volatile.Read(ref _mergedTickCount);
+
+    /// <summary>
     /// 邮箱中是否还有待处理消息
     /// </summary>
     public bool HasPendingMessages => _reader.TryPeek(out _);
@@ -38,11 +64,13 @@ public abstract class Actor : IAsyncDisposable
     protected Actor(ActorContext context, int mailboxCapacity = 1024)
     {
         Context = context ?? throw new ArgumentNullException(nameof(context));
+        _mailboxCapacity = mailboxCapacity;
         var channel = Channel.CreateBounded<IAMessage>(
             new BoundedChannelOptions(mailboxCapacity)
             {
-                // 邮箱满时丢弃新消息（防雪崩）
-                FullMode = BoundedChannelFullMode.DropWrite
+                // Wait 模式下 TryWrite 满时返回 false；丢弃决策由 TellAsync 显式处理。
+                // DropWrite 的 TryWrite 永远返回 true（静默丢弃），无法感知丢失。
+                FullMode = BoundedChannelFullMode.Wait
             });
         _reader = channel.Reader;
         _writer = channel.Writer;
@@ -55,15 +83,42 @@ public abstract class Actor : IAsyncDisposable
     /// <summary>
     /// 投递消息到邮箱，并通知调度器
     /// </summary>
-    internal async ValueTask TellAsync(IAMessage msg)
+    internal ValueTask TellAsync(IAMessage msg)
     {
-        if (_disposed) return;
+        if (_disposed) return ValueTask.CompletedTask;
 
-        await _writer.WriteAsync(msg);
+        if (!_writer.TryWrite(msg))
+        {
+            if (msg is ISystemMessage)
+            {
+                // 系统消息必须送达：邮箱满时驱逐最旧消息腾位（停止/终止信号丢失会破坏监督链）。
+                // Worker 可能并发消费，驱逐失败时立即重试写入。
+                while (!_writer.TryWrite(msg))
+                {
+                    if (_disposed) return ValueTask.CompletedTask;
+                    if (!_reader.TryRead(out var evicted))
+                        continue; // Worker 已消费出空间，直接重试写入
 
-        // 协程挂起中不入队：恢复后由 Worker 收尾兜底重新入队
+                    var evictedTotal = Interlocked.Increment(ref _droppedMessageCount);
+                    Log.Warning("[Actor] {Path} mailbox full ({Capacity}), evicted {EvictedType} to deliver system message {Type} (total evicted: {Total})",
+                        Context.Path, _mailboxCapacity, evicted.GetType().Name, msg.GetType().Name, evictedTotal);
+                }
+            }
+            else
+            {
+                // 普通消息邮箱满时丢弃（防雪崩），必须记录让上层可感知
+                var dropped = Interlocked.Increment(ref _droppedMessageCount);
+                Log.Warning("[Actor] {Path} mailbox full ({Capacity}), dropped {Type} (total: {Dropped})",
+                    Context.Path, _mailboxCapacity, msg.GetType().Name, dropped);
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        // 协程挂起中不入队：恢复后由 Worker 收尾兑底重新入队
         if (!HasPendingContinuation)
             Scheduler?.Schedule(this);
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>
@@ -125,10 +180,18 @@ public abstract class Actor : IAsyncDisposable
     /// </summary>
     internal void StoreContinuation(Action rawContinuation, Action onSuspend)
     {
+        // 引擎 awaitable 必须在调度上下文内被 await：逃逸到线程池的协程在此立即失败
+        if (!ReferenceEquals(s_dispatchContext.Value, this))
+        {
+            throw new InvalidOperationException(
+                $"[Actor] {Context.Path} awaits engine awaitable outside dispatch context; coroutine escaped scheduler");
+        }
+
         _pendingContinuation = () =>
         {
             try
             {
+                s_dispatchContext.Value = this;
                 rawContinuation();
             }
             catch (OperationCanceledException)
@@ -138,6 +201,10 @@ public abstract class Actor : IAsyncDisposable
             catch (Exception ex)
             {
                 HandleError(ex, null);
+            }
+            finally
+            {
+                s_dispatchContext.Value = null;
             }
         };
         onSuspend();
@@ -159,6 +226,7 @@ public abstract class Actor : IAsyncDisposable
         ValueTask task;
         try
         {
+            s_dispatchContext.Value = this;
             task = DispatchMessageAsync(msg);
         }
         catch (OperationCanceledException)
@@ -170,9 +238,14 @@ public abstract class Actor : IAsyncDisposable
             HandleError(ex, msg);
             return;
         }
+        finally
+        {
+            s_dispatchContext.Value = null;
+        }
 
         if (HasPendingContinuation || task.IsCompleted) return;
 
+        // 业务代码 await 了原生异步方法：协程已脱离调度器，串行保证被破坏
         Log.Error("[Actor] {Path} awaits a non-engine awaitable; coroutine escaped scheduler", Context.Path);
     }
 
@@ -183,67 +256,51 @@ public abstract class Actor : IAsyncDisposable
             case SystemStopMessage:
                 return StopAsync();
             case TimerTickMessage tick:
+                DrainDuplicateTicks(tick.TimerId);
                 return Context.ExecuteTimerAsync(tick.TimerId);
+            case TerminatedMessage terminated:
+                // 子 Actor 终止：先清理上下文中的引用，业务层仍可收到该消息做重启等决策
+                Context.RemoveChild(terminated.ActorRef);
+                return OnReceiveAsync(msg);
             default:
                 return OnReceiveAsync(msg);
         }
     }
 
+    /// <summary>
+    /// 合并积压的同一定时器到期消息：慢 Actor 下 tick 会在邮箱中堆积，
+    /// 丢弃连续的重复 tick 只保留一个，避免突发追赶执行
+    /// </summary>
+    private void DrainDuplicateTicks(int timerId)
+    {
+        while (_reader.TryPeek(out var next) && next is TimerTickMessage dup && dup.TimerId == timerId)
+        {
+            _reader.TryRead(out _);
+            Interlocked.Increment(ref _mergedTickCount);
+        }
+    }
+
     private async ValueTask StopAsync()
     {
+        if (_disposed) return;
         await Context.DisposeAsync();
         _disposed = true;
-    }
-
-    /// <summary>
-    /// 兼容模式：独立消息循环（当没有调度器时使用）
-    /// </summary>
-    internal void StartStandalone()
-    {
-        _ = ProcessMessagesStandaloneAsync();
-    }
-
-    private async Task ProcessMessagesStandaloneAsync()
-    {
-        await foreach (var msg in _reader.ReadAllAsync(Context.CancellationToken))
-        {
-            if (msg is ISystemMessage sysMsg && sysMsg is SystemStopMessage)
-            {
-                await Context.DisposeAsync();
-                return;
-            }
-
-            // 定时器到期：在调度上下文中执行回调
-            if (msg is TimerTickMessage tick)
-            {
-                await Context.ExecuteTimerAsync(tick.TimerId);
-                continue;
-            }
-
-            try
-            {
-                await OnReceiveAsync(msg).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                HandleError(ex, msg);
-                if (_shouldStopDueToError) break;
-            }
-        }
+        // 从系统摘除并通知监视者（监督链路的关键一环）
+        Context.NotifyTerminated();
     }
 
     protected virtual void HandleError(Exception ex, IAMessage? msg)
     {
-        // 简化版：业务异常仅记录，系统异常标记停止
+        // 业务异常仅记录，系统错误才停止 Actor（由 StopAsync 摘除注册并通知监视者）
         if (ex is BusinessException || ex is OperationCanceledException)
         {
-            System.Diagnostics.Debug.WriteLine($"[BusinessError] {ex.Message}");
+            Log.Warning("[Actor] {Path} business error: {Message}", Context.Path, ex.Message);
             return;
         }
 
-        // 系统错误：标记停止（通过系统消息优雅退出）
-        System.Diagnostics.Debug.WriteLine($"[CriticalError] {Context.Path}: {ex.GetType().Name}");
-        _shouldStopDueToError = true;
+        Log.Error(ex, "[Actor] {Path} critical error while handling {MessageType}",
+            Context.Path, msg?.GetType().Name ?? "unknown");
+        Context.SetErrorState();
         _ = TellAsync(new SystemStopMessage { Reason = "CriticalError" });
     }
 

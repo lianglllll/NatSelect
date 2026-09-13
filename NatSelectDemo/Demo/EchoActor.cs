@@ -1,7 +1,7 @@
 using NatSelect.Core;
 using Serilog;
 
-namespace NatSelectDemo;
+namespace NatSelectDemo.Demo;
 
 /// <summary>
 /// 简单的 Echo Actor 示例

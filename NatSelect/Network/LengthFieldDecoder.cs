@@ -22,7 +22,8 @@ namespace NatSelect.Network;
 public class LengthFieldDecoder
 {
     // 状态字段
-    private bool m_isStart = false;                  // 解码器是否已经启动
+    // 解码循环与 ActiveDisconnection 跨线程读写，volatile 保证可见性
+    private volatile bool m_isStart;                   // 解码器是否已经启动
     private Socket m_Socket;
     private Memory<byte> m_bufferMem;               
     private int m_offset = 0;                        // 缓冲区目前的长度
@@ -37,8 +38,8 @@ public class LengthFieldDecoder
     // 委托事件
     public delegate void ReceivedHandler(ReadOnlyMemory<byte> data);
     public delegate void DisconnectedHandler();
-    private event ReceivedHandler m_onDataRecived;
-    private event DisconnectedHandler m_onDisconnected;
+    private event ReceivedHandler? m_onDataRecived;
+    private event DisconnectedHandler? m_onDisconnected;
 
     public LengthFieldDecoder(
         Socket socket, 
@@ -47,8 +48,8 @@ public class LengthFieldDecoder
         int lengthFieldLength = 4,
         int lengthAdjustment = 0, 
         int initialBytesToStrip = 4, 
-        ReceivedHandler onDataRecived = null, 
-        DisconnectedHandler onDisconnected = null)
+        ReceivedHandler? onDataRecived = null, 
+        DisconnectedHandler? onDisconnected = null)
     {
         m_Socket = socket;
         m_maxBufferLength = maxBufferLength;
@@ -106,7 +107,7 @@ public class LengthFieldDecoder
         {
 
         }
-        m_Socket = null;
+        m_Socket = null!;
 
         // 并且向上传递消息断开信息
         if (m_isStart)
@@ -135,11 +136,11 @@ public class LengthFieldDecoder
             bool hasEnoughHeader = m_offset >= headLen;
             if (!hasEnoughHeader) return;
 
-            // 3. 安全读取长度字段
+            // 3. 安全读取长度字段（非法值无法恢复解析位置，直接断开防止恶意数据刷日志）
             if (!TryReadLengthField(bufferSpan, out int bodyLen))
             {
                 Log.Warning("Invalid length field format");
-                return;
+                throw new InvalidDataException("Invalid length field format");
             }
 
             // 4. 计算总包长度并验证

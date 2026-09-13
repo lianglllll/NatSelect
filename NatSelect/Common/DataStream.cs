@@ -17,6 +17,7 @@ namespace NatSelect.Common;
         private static ConcurrentQueue<DataStream> pool = new();
         public static int PoolMaxCount = 200;
         public static bool IsLittleEndian = false; //是否小端模式
+        private int _returned;
 
         private DataStream()
         {
@@ -30,8 +31,8 @@ namespace NatSelect.Common;
             //从对象池中获取
             if (pool.TryDequeue(out var stream))
             {
+                stream._returned = 0;
                 stream.SetLength(0);
-                //stream.Seek(0, SeekOrigin.Begin);
                 stream.Position = 0;
                 return stream;
             }
@@ -53,19 +54,19 @@ namespace NatSelect.Common;
         /// <param name="disposing"></param>
         protected override void Dispose(bool disposing)
         {
-            //Log.Information("DataStream自动释放");
+            // 防双重归还：同一实例只能回池一次，否则两个使用者会拿到同一缓冲区互相覆盖
+            if (Interlocked.Exchange(ref _returned, 1) != 0) return;
+
             if (pool.Count < PoolMaxCount)
             {
                 Position = 0;
                 SetLength(0);
-                //this.Seek(0, SeekOrigin.Begin);
                 pool.Enqueue(this);
             }
             else
             {
                 base.Dispose(disposing);
             }
-
         }
 
 
@@ -254,13 +255,14 @@ namespace NatSelect.Common;
         public void WriteText(string value)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(value);
-            ushort length = (ushort)bytes.Length;
-            if (length > ushort.MaxValue)
+            if (bytes.Length > ushort.MaxValue)
             {
-                length = ushort.MaxValue;
+                // 超长文本无法用 2 字节长度头表示，静默截断会破坏数据，直接报错
+                throw new ArgumentException(
+                    $"Text too long: {bytes.Length} bytes exceeds max {ushort.MaxValue}", nameof(value));
             }
-            WriteUInt16(length);
-            Write(bytes, 0, length);
+            WriteUInt16((ushort)bytes.Length);
+            Write(bytes, 0, bytes.Length);
         }
 
         // 写入一个长文本（字节长度小于 int.MaxValue）
@@ -274,8 +276,10 @@ namespace NatSelect.Common;
         public string ReadText()
         {
             ushort length = ReadUInt16();
+            if (length > Length - Position)
+                throw new InvalidDataException($"Invalid text length: {length}");
             byte[] bytes = new byte[length];
-            Read(bytes, 0, length);
+            ReadExactly(bytes, 0, length);
             return Encoding.UTF8.GetString(bytes);
         }
 
@@ -283,8 +287,10 @@ namespace NatSelect.Common;
         public string ReadLongText()
         {
             int length = ReadInt32();
+            if (length < 0 || length > Length - Position)
+                throw new InvalidDataException($"Invalid long text length: {length}");
             byte[] bytes = new byte[length];
-            Read(bytes, 0, length);
+            ReadExactly(bytes, 0, length);
             return Encoding.UTF8.GetString(bytes);
         }
 
@@ -360,8 +366,10 @@ namespace NatSelect.Common;
 
         public byte[] ReadBytes(int len)
         {
+            if (len < 0 || len > Length - Position)
+                throw new InvalidDataException($"Invalid byte length: {len}");
             byte[] buffer = new byte[len];
-            Read(buffer, 0, len);
+            ReadExactly(buffer, 0, len);
             return buffer;
         }
 

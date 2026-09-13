@@ -21,5 +21,8 @@ public record ActorSnapshot(
     string Path,
     ActorState State,
     int MailboxSize,
+    int MailboxCapacity,
+    int DroppedMessageCount,
+    int MergedTickCount,
     IReadOnlyList<ActorSnapshot> Children
 );

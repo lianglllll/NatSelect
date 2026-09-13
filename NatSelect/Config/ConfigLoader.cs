@@ -53,6 +53,6 @@ public static class ConfigLoader
             .Build();
 
         var obj = deserializer.Deserialize(yamlContent);
-        return (dynamic)obj;
+        return (dynamic)obj!;
     }
 }

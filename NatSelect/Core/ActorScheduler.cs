@@ -15,7 +15,8 @@ public sealed class ActorScheduler : IAsyncDisposable
     private readonly Channel<Actor> _readyQueue;
     private Task[] _workers = Array.Empty<Task>();
     private CancellationTokenSource _cts = new();
-    private bool _isStopping;
+    // Worker 退出标志由 StopAsync 写入、Worker 线程读取，volatile 保证可见性
+    private volatile bool _isStopping;
 
     // 每次调度处理的最大消息数（防止单个 Actor 独占 Worker）
     private const int MaxMessagesPerSlice = 10;
@@ -78,10 +79,12 @@ public sealed class ActorScheduler : IAsyncDisposable
     {
         actor.ClearScheduled();
 
-        // 其他 Worker 正在执行该 Actor：放回稍后重试
+        // 其他 Worker 正在执行该 Actor：仅当仍有待处理工作才重新入队
+        // （挂起续延与新消息路径自身都会触发 Schedule，空转重入队只会浪费 Worker 周期）
         if (!actor.TryBeginProcessing())
         {
-            Schedule(actor);
+            if (actor.HasPendingContinuation || actor.HasPendingMessages)
+                Schedule(actor);
             return;
         }
 

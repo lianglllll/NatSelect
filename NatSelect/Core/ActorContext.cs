@@ -7,10 +7,12 @@ public sealed class ActorContext : IAsyncDisposable
     private readonly IActorSystem m_system;
     private readonly CancellationTokenSource m_cts = new();
     private readonly ConcurrentDictionary<string, ActorRef> m_children = new();
-    private readonly HashSet<ActorRef> m_watching = new();
+    private readonly ConcurrentDictionary<ActorRef, byte> m_watching = new();
     private readonly ConcurrentDictionary<int, ActorTimer> m_timers = new();
-    private int m_nextTimerId = 1;
+    // 初始 0，首个定时器 ID 从 1 开始
+    private int m_nextTimerId;
     private ActorState m_state = ActorState.Created;
+    private int m_disposeState;
 
     public ActorRef Self { get; }
     public ActorRef? Parent { get; }
@@ -42,13 +44,15 @@ public sealed class ActorContext : IAsyncDisposable
             throw new ArgumentNullException(nameof(message));
         }
 
-        message.Sender = Self;
+        // 仅在无发送者时注入 Self，保留转发链上的原始发送者
+        if (!message.Sender.IsValid)
+            message.Sender = Self;
 
         // 根据目标节点判断是本地消息还是远程消息
         if (target.IsLocal(m_system.NodeId))
             return m_system.SendAsync(target, message);
         else
-            return m_system.SendRemoteAsync(Self, target, message);
+            return m_system.SendRemoteAsync(message.Sender, target, message);
     }
 
     public ActorRef SpawnChild<T>(string name, params object[] args) where T : Actor
@@ -61,7 +65,7 @@ public sealed class ActorContext : IAsyncDisposable
         var childRef = m_system.SpawnActor<T>(this, name, args);
         m_children.TryAdd(name, childRef);
         m_system.Watch(Self, childRef);
-        m_watching.Add(childRef);
+        m_watching.TryAdd(childRef, 0);
         return childRef;
     }
 
@@ -69,7 +73,8 @@ public sealed class ActorContext : IAsyncDisposable
     {
         if (m_children.TryRemove(name, out var childRef))
         {
-            m_watching.Remove(childRef);
+            m_watching.TryRemove(childRef, out _);
+            m_system.Unwatch(Self, childRef);
             await m_system.StopActorAsync(childRef).ConfigureAwait(false);
         }
     }
@@ -77,7 +82,7 @@ public sealed class ActorContext : IAsyncDisposable
     public void Watch(ActorRef target)
     {
         m_system.Watch(Self, target);
-        lock (m_watching) m_watching.Add(target);
+        m_watching.TryAdd(target, 0);
     }
 
     #region 定时器
@@ -177,8 +182,37 @@ public sealed class ActorContext : IAsyncDisposable
     public ActorRef? LookupService(string serviceName) =>
         m_system.LookupService(serviceName);
 
+    /// <summary>
+    /// Actor 终止后调用：从系统摘除注册并通知监视者
+    /// </summary>
+    internal void NotifyTerminated() => m_system.OnActorTerminated(Self);
+
+    /// <summary>
+    /// 标记严重错误状态（由 Actor.HandleError 调用，供诊断快照展示）
+    /// </summary>
+    internal void SetErrorState() => m_state = ActorState.Error;
+
+    /// <summary>
+    /// 移除已终止的子 Actor 引用（收到 TerminatedMessage 时由 Actor 基类调用）
+    /// </summary>
+    internal void RemoveChild(ActorRef childRef)
+    {
+        foreach (var kv in m_children)
+        {
+            if (kv.Value == childRef)
+            {
+                m_children.TryRemove(kv.Key, out _);
+                break;
+            }
+        }
+        m_watching.TryRemove(childRef, out _);
+    }
+
     public async ValueTask DisposeAsync()
     {
+        // 幂等守卫：SystemStopMessage 路径与外部 StopActorAsync 可能并发触发
+        if (Interlocked.Exchange(ref m_disposeState, 1) != 0) return;
+
         m_state = ActorState.Stopping;
         m_cts.Cancel();
 
@@ -197,7 +231,7 @@ public sealed class ActorContext : IAsyncDisposable
         m_children.Clear();
 
         // 3. 清理监视关系
-        foreach (var target in m_watching.ToArray())
+        foreach (var target in m_watching.Keys.ToArray())
             m_system.Unwatch(Self, target);
         m_watching.Clear();
 

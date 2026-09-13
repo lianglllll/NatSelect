@@ -11,7 +11,8 @@ namespace NatSelect.Network;
 public sealed class TcpServerListener : IAsyncDisposable
 {
     private Socket? _listenSocket;
-    private bool _isStopping;
+    // 停止标志由 StopAsync 写入、Accept 循环读取，volatile 保证可见性
+    private volatile bool _isStopping;
     private int _maxConnections;
     private int _currentConnectionCount;
 
@@ -66,7 +67,7 @@ public sealed class TcpServerListener : IAsyncDisposable
                 // 监听 Socket 被关闭，正常退出
                 break;
             }
-            catch (SocketException ex) when (_isStopping)
+            catch (SocketException) when (_isStopping)
             {
                 // 正在关闭，忽略
                 break;

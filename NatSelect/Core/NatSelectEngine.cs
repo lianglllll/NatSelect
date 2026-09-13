@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using NatSelect.Config;
 using NatSelect.Config.Template;
 using NatSelect.Logger;
@@ -19,7 +21,8 @@ public sealed class NatSelectEngine : IAsyncDisposable
         Stopping 
     }
 
-    private EngineState _state = EngineState.Stopped;
+    // 状态由 StartAsync/StopAsync 写入、外部线程通过 State 属性读取，volatile 保证可见性
+    private volatile EngineState _state = EngineState.Stopped;
     private readonly string _configPath;
 
     // 核心组件
@@ -28,9 +31,10 @@ public sealed class NatSelectEngine : IAsyncDisposable
     public IActorSystem ActorSystem { get; private set; } = null!;
     public NetworkService? NetworkService { get; private set; }
 
-    // 上层回调：客户端连接/断开事件
+    // 上层回调：客户端连接/断开/消息事件
     public Func<TcpConnection, ValueTask>? OnClientConnected { get; set; }
     public Action<TcpConnection>? OnClientDisconnected { get; set; }
+    public Func<long, Google.Protobuf.IMessage, ValueTask>? OnClientMessage { get; set; }
 
     public EngineState State => _state;
 
@@ -81,11 +85,13 @@ public sealed class NatSelectEngine : IAsyncDisposable
                 localSystem.SetNetworkService(NetworkService);
             }
 
-            // 6.6 注册客户端连接回调
+            // 6.6 注册客户端回调
             if (OnClientConnected != null)
                 NetworkService.OnClientConnected = OnClientConnected;
             if (OnClientDisconnected != null)
                 NetworkService.OnClientDisconnected = OnClientDisconnected;
+            if (OnClientMessage != null)
+                NetworkService.OnClientMessage = OnClientMessage;
 
             Log.Information("NetworkService created (Port: {Port})", Config.Network.ListenPort);
 
@@ -104,6 +110,7 @@ public sealed class NatSelectEngine : IAsyncDisposable
         {
             _state = EngineState.Stopped;
             Log.Fatal(ex, "Engine startup failed!");
+            await RollbackAsync();
             throw;
         }
     }
@@ -163,11 +170,25 @@ public sealed class NatSelectEngine : IAsyncDisposable
         Config = ConfigLoader.Load<ConfigTemplate>(_configPath);
     }
 
+    private async Task RollbackAsync()
+    {
+        // 启动失败时释放已启动的组件（调度器 Worker 线程等），避免残留后台线程
+        try
+        {
+            if (NetworkService != null) await NetworkService.DisposeAsync();
+            if (ActorSystem != null) await ActorSystem.DisposeAsync();
+        }
+        catch (Exception cleanupEx)
+        {
+            Log.Error(cleanupEx, "Cleanup after startup failure failed");
+        }
+    }
+
     private ulong GenerateNodeId()
     {
-        // 简单实现：基于机器名哈希 + 端口号，保证同一机器不同端口有不同 ID
-        var nameHash = (ulong)_configPath.GetHashCode();
-        var portHash = (ulong)Config.Network.ListenPort;
-        return (nameHash << 32) | portHash;
+        // 用 SHA256 生成稳定身份：string.GetHashCode 是进程级随机化的，会导致 NodeId 跨重启漂移
+        var identity = $"{Environment.MachineName}:{Config.Network.ListenPort}";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        return BitConverter.ToUInt64(hash, 0);
     }
 }

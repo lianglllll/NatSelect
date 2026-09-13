@@ -2,7 +2,7 @@ using NatSelect.Auth;
 using NatSelect.Core;
 using Serilog;
 
-namespace NatSelectDemo;
+namespace NatSelectDemo.Demo;
 
 public class AuthDemoActor : Actor
 {

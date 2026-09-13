@@ -1,4 +1,6 @@
 ﻿using System.Collections.Concurrent;
+using System.Reflection;
+using System.Text;
 using NatSelect.Config.Template;
 using NatSelect.Network;
 using Serilog;
@@ -17,6 +19,9 @@ public sealed class LocalActorSystem : IActorSystem
     private ulong _nextActorId = 1;
     private readonly ActorSystemConfig _config;
     private readonly ActorScheduler _scheduler;
+
+    // 构造函数缓存：按 (Actor类型, 参数类型签名) 复用，避免高频 Spawn 的反射开销
+    private static readonly ConcurrentDictionary<string, ConstructorInfo> s_ctorCache = new();
 
     public ulong NodeId { get; }
 
@@ -47,7 +52,7 @@ public sealed class LocalActorSystem : IActorSystem
         if (args.Length > 0)
             Array.Copy(args, 0, ctorArgs, 1, args.Length);
 
-        var actor = (Actor)Activator.CreateInstance(typeof(T), ctorArgs)!;
+        var actor = (Actor)GetOrCreateConstructor(typeof(T), ctorArgs).Invoke(ctorArgs);
 
         // 注入调度器与协程归属（协程原语需要回写续延到 Actor）
         actor.Scheduler = _scheduler;
@@ -68,11 +73,20 @@ public sealed class LocalActorSystem : IActorSystem
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask StopActorAsync(ActorRef actorRef)
+    public async ValueTask StopActorAsync(ActorRef actorRef)
     {
         if (_actors.TryRemove(actorRef.ActorId, out var actor))
-            return actor.DisposeAsync();
-        return ValueTask.CompletedTask;
+        {
+            await actor.DisposeAsync();
+            // 通知监视者：监督语义要求父 Actor 收到 TerminatedMessage
+            NotifyWatchers(actorRef);
+        }
+    }
+
+    public void OnActorTerminated(ActorRef actorRef)
+    {
+        _actors.TryRemove(actorRef.ActorId, out _);
+        NotifyWatchers(actorRef);
     }
 
     public bool IsActorAlive(ActorRef actorRef) => _actors.ContainsKey(actorRef.ActorId);
@@ -106,7 +120,9 @@ public sealed class LocalActorSystem : IActorSystem
         var result = new List<ActorSnapshot>();
         foreach (var actor in _actors.Values)
         {
-            // 返回所有 Actor（简化版，显示完整的树）
+            // 仅从根 Actor 开始构建，避免子树重复出现在结果中
+            var parent = actor.Context.Parent;
+            if (parent.HasValue && _actors.ContainsKey(parent.Value.ActorId)) continue;
             result.Add(BuildActorSnapshot(actor));
         }
         return result;
@@ -126,23 +142,53 @@ public sealed class LocalActorSystem : IActorSystem
 
     private ActorSnapshot BuildActorSnapshot(Actor actor)
     {
-        var children = new List<ActorSnapshot>();
-        foreach (var childRef in actor.Context.Children.Values)
+        // 显式栈迭代实现后序遍历，避免深层 Actor 树触发线程栈溢出
+        var snapshots = new Dictionary<ulong, ActorSnapshot>();
+        var stack = new Stack<Actor>();
+        stack.Push(actor);
+
+        while (stack.Count > 0)
         {
-            if (_actors.TryGetValue(childRef.ActorId, out var childActor))
+            var current = stack.Pop();
+            if (snapshots.ContainsKey(current.Context.Self.ActorId)) continue; // 重检时可能重复入栈
+
+            var children = new List<ActorSnapshot>();
+            bool allChildrenReady = true;
+            foreach (var childRef in current.Context.Children.Values)
             {
-                children.Add(BuildActorSnapshot(childActor));
+                if (!_actors.TryGetValue(childRef.ActorId, out var childActor)) continue;
+
+                if (snapshots.TryGetValue(childRef.ActorId, out var childSnapshot))
+                {
+                    children.Add(childSnapshot);
+                }
+                else
+                {
+                    allChildrenReady = false;
+                    stack.Push(childActor);
+                }
             }
+
+            if (!allChildrenReady)
+            {
+                stack.Push(current); // 待子节点快照就绪后再重建
+                continue;
+            }
+
+            snapshots[current.Context.Self.ActorId] = new ActorSnapshot(
+                Self: current.Context.Self,
+                Name: current.Context.Name,
+                Path: current.Context.Path,
+                State: current.Context.State,
+                MailboxSize: current.MailboxSize,
+                MailboxCapacity: current.MailboxCapacity,
+                DroppedMessageCount: current.DroppedMessageCount,
+                MergedTickCount: current.MergedTickCount,
+                Children: children
+            );
         }
 
-        return new ActorSnapshot(
-            Self: actor.Context.Self,
-            Name: actor.Context.Name,
-            Path: actor.Context.Path,
-            State: actor.Context.State,
-            MailboxSize: 0, // TODO: 可以从 Channel 获取
-            Children: children
-        );
+        return snapshots[actor.Context.Self.ActorId];
     }
 
     #endregion
@@ -202,6 +248,48 @@ public sealed class LocalActorSystem : IActorSystem
         }
 
         _watchersByTarget.TryRemove(target.ActorId, out _);
+    }
+
+    private static ConstructorInfo GetOrCreateConstructor(Type actorType, object[] ctorArgs)
+    {
+        var paramTypes = new Type[ctorArgs.Length];
+        for (int i = 0; i < ctorArgs.Length; i++)
+            paramTypes[i] = ctorArgs[i]?.GetType() ?? typeof(object);
+
+        var key = BuildCtorCacheKey(actorType, paramTypes);
+        return s_ctorCache.GetOrAdd(key, _ => FindConstructor(actorType, paramTypes));
+    }
+
+    private static string BuildCtorCacheKey(Type actorType, Type[] paramTypes)
+    {
+        var sb = new StringBuilder(actorType.FullName);
+        foreach (var t in paramTypes)
+            sb.Append('|').Append(t.FullName);
+        return sb.ToString();
+    }
+
+    private static ConstructorInfo FindConstructor(Type actorType, Type[] paramTypes)
+    {
+        foreach (var ctor in actorType.GetConstructors())
+        {
+            var parameters = ctor.GetParameters();
+            if (parameters.Length != paramTypes.Length) continue;
+
+            bool matches = true;
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                // 按可赋值性匹配（兼容派生类实参），与 Activator.CreateInstance 语义一致
+                if (!parameters[i].ParameterType.IsAssignableFrom(paramTypes[i]))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return ctor;
+        }
+
+        throw new InvalidOperationException(
+            $"Actor type {actorType.Name} has no constructor matching the given argument types");
     }
 }
 

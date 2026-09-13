@@ -80,20 +80,18 @@ public class ProtoHelper : Singleton<ProtoHelper>
         }
     }
 
-    public Type Seq2Type(int code)
+    public Type? Seq2Type(int code)
     {
-        if (m_sequence2type.ContainsKey(code))
+        if (m_sequence2type.TryGetValue(code, out var type))
         {
-            return m_sequence2type[code];
+            return type;
         }
-        else
-        {
-            Log.Error($"[ProtoHelper.Seq2Type]未找到对应的协议id:{code}");
-            return null;
-        }
+
+        Log.Error("[ProtoHelper.Seq2Type] Unknown protocol id: {Code}", code);
+        return null;
     }
 
-    public IMessage ByteArrayParse2IMessage(ReadOnlyMemory<byte> data)
+    public IMessage? ByteArrayParse2IMessage(ReadOnlyMemory<byte> data)
     {
         /*            ushort typeCode = _GetUShort(data, 0);
                     Type t = Seq2Type(typeCode);
@@ -110,14 +108,25 @@ public class ProtoHelper : Singleton<ProtoHelper>
         ReadOnlySpan<byte> span = data.Span;
         ushort typeCode = BinaryPrimitives.ReadUInt16BigEndian(span);
 
-        Type t = Seq2Type(typeCode);
-        var desc = t.GetProperty("Descriptor").GetValue(t) as MessageDescriptor;
+        var t = Seq2Type(typeCode);
+        if (t == null)
+        {
+            Log.Error("[ProtoHelper.ParseFrom] Unknown protocol id: {Code}", typeCode);
+            return null;
+        }
+
+        var desc = t.GetProperty("Descriptor")?.GetValue(t) as MessageDescriptor;
+        if (desc == null)
+        {
+            Log.Error("[ProtoHelper.ParseFrom] Cannot get descriptor for type: {Type}", t.Name);
+            return null;
+        }
 
         // 使用Span解析
         return desc.Parser.ParseFrom(span.Slice(2));
     }
     
-    public byte[] IMessageParse2ByteArray(IMessage message)
+    public byte[]? IMessageParse2ByteArray(IMessage message)
     {
         //获取imessage类型所对应的编号，网络传输我们只传输编号
         using (var ds = DataStream.Allocate())

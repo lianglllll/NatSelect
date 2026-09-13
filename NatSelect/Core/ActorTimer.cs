@@ -12,7 +12,8 @@ public sealed class ActorTimer : IAsyncDisposable
     private readonly Func<ValueTask> _callback;
     private readonly IActorSystem _system;
     private readonly ActorRef _self;
-    private bool _isDisposed;
+    // 释放标志由 DisposeAsync 写入、Timer 线程池回调读取，volatile 保证可见性
+    private volatile bool _isDisposed;
 
     public int Id { get; }
     public bool IsRepeating { get; }

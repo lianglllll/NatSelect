@@ -36,6 +36,11 @@ public interface IActorSystem : IAsyncDisposable
     void Watch(ActorRef watcher, ActorRef target);
     void Unwatch(ActorRef watcher, ActorRef target);
 
+    /// <summary>
+    /// Actor 终止回调：从注册表摘除并通知所有监视者
+    /// </summary>
+    void OnActorTerminated(ActorRef actorRef);
+
     // 诊断（运维必备）
     int GetTotalActorCount();
 }
