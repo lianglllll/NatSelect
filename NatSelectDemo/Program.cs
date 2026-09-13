@@ -44,7 +44,7 @@ public class Program
             await engine.StartAsync();
 
             // 运行演示
-            await ProgramDemo.RunAsync(engine);
+            await EchoDemo.RunAsync(engine);
 
             Log.Information("Use stop.bat or Ctrl+C to exit.");
 
