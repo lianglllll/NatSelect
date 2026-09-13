@@ -95,9 +95,25 @@ public sealed class LocalActorSystem : IActorSystem
     public ActorRef? LookupService(string name) => _services.TryGetValue(name, out var r) ? r : null;
     public void Watch(ActorRef watcher, ActorRef target)
     {
-        _watchersByTarget
-            .GetOrAdd(target.ActorId, _ => new ConcurrentDictionary<ulong, bool>())
-            .TryAdd(watcher.ActorId, true);
+        // 目标已死：立即补发终止通知（对齐 Erlang monitor 语义），
+        // 避免监视者注册后永远等不到 TerminatedMessage 且条目永久残留
+        if (!_actors.ContainsKey(target.ActorId))
+        {
+            SendTerminated(watcher.ActorId, target);
+            return;
+        }
+
+        var watchers = _watchersByTarget
+            .GetOrAdd(target.ActorId, _ => new ConcurrentDictionary<ulong, bool>());
+        watchers.TryAdd(watcher.ActorId, true);
+
+        // 注册窗口内目标死亡：若自身条目未被 NotifyWatchers 的通知轮带走，补发一次，
+        // 防止目标恰在注册瞬间死亡导致通知丢失（业务侧 TerminatedMessage 处理需幂等）
+        if (!_actors.ContainsKey(target.ActorId) && watchers.TryRemove(watcher.ActorId, out _))
+        {
+            if (watchers.IsEmpty) _watchersByTarget.TryRemove(target.ActorId, out _);
+            SendTerminated(watcher.ActorId, target);
+        }
     }
 
     public void Unwatch(ActorRef watcher, ActorRef target)
@@ -233,21 +249,26 @@ public sealed class LocalActorSystem : IActorSystem
 
     private void NotifyWatchers(ActorRef target)
     {
-        if (!_watchersByTarget.TryGetValue(target.ActorId, out var watchers)) return;
+        // 先移除条目再通知：并发注册的监视者会重建条目并自行重检补发，
+        // 避免枚举期间新注册的 watcher 被无通知移除（监督链闭环的关键）
+        if (!_watchersByTarget.TryRemove(target.ActorId, out var watchers)) return;
 
         foreach (var (watcherId, _) in watchers)
         {
-            if (_actors.TryGetValue(watcherId, out var watcherActor))
-            {
-                _ = watcherActor.TellAsync(new TerminatedMessage
-                {
-                    ActorRef = target,
-                    Sender = ActorRef.Invalid
-                });
-            }
+            SendTerminated(watcherId, target);
         }
+    }
 
-        _watchersByTarget.TryRemove(target.ActorId, out _);
+    private void SendTerminated(ulong watcherId, ActorRef target)
+    {
+        if (_actors.TryGetValue(watcherId, out var watcherActor))
+        {
+            _ = watcherActor.TellAsync(new TerminatedMessage
+            {
+                ActorRef = target,
+                Sender = ActorRef.Invalid
+            });
+        }
     }
 
     private static ConstructorInfo GetOrCreateConstructor(Type actorType, object[] ctorArgs)

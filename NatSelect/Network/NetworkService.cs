@@ -117,8 +117,15 @@ public sealed class NetworkService : IAsyncDisposable
             Log.Debug("[NetworkService] Client {ConnId} disconnected", connId);
             _listener?.OnConnectionClosed();
 
-            // 通知上层
-            OnClientDisconnected?.Invoke(connection);
+            // 通知上层（上层回调异常不能击穿断线清理路径）
+            try
+            {
+                OnClientDisconnected?.Invoke(connection);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "OnClientDisconnected handler failed for Conn {Id}", connId);
+            }
         }
     }
 

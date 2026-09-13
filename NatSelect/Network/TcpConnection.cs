@@ -18,6 +18,8 @@ public class TcpConnection
 
     private readonly Channel<byte[]> _sendQueue;
     private volatile bool _isClosed;
+    // 断线回调只允许触发一次（主动/被动断线路径可能并发汇合到 Close）
+    private int _disconnectNotified;
 
     private readonly Action<long, IMessage> _onMessageReceived;
     private readonly Action<long> _onDisconnected;
@@ -94,8 +96,8 @@ public class TcpConnection
 
     private void OnDisconnectedInternal()
     {
+        // 通知统一由 Close 幂等触发，避免主动/被动路径重复回调
         Close();
-        _onDisconnected?.Invoke(ConnectionId);
     }
 
     public void Send(IMessage message)
@@ -172,6 +174,10 @@ public class TcpConnection
         }
         catch { }
         Log.Debug("Connection {Id} closed", ConnectionId);
+
+        // 无论主动/被动断开都必须通知一次：NetworkService 依赖此回调清理连接池与连接计数
+        if (Interlocked.Exchange(ref _disconnectNotified, 1) == 0)
+            _onDisconnected?.Invoke(ConnectionId);
     }
 }
 

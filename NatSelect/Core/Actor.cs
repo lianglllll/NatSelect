@@ -245,8 +245,11 @@ public abstract class Actor : IAsyncDisposable
 
         if (HasPendingContinuation || task.IsCompleted) return;
 
-        // 业务代码 await 了原生异步方法：协程已脱离调度器，串行保证被破坏
-        Log.Error("[Actor] {Path} awaits a non-engine awaitable; coroutine escaped scheduler", Context.Path);
+        // 业务代码 await 了原生异步方法：协程已脱离调度器，串行保证被破坏。
+        // fail-fast：立即终止 Actor，避免逃逸协程与后续消息并发操作 Actor 状态
+        Log.Error("[Actor] {Path} awaits a non-engine awaitable; coroutine escaped scheduler, stopping actor", Context.Path);
+        Context.SetErrorState();
+        _ = TellAsync(new SystemStopMessage { Reason = "CoroutineEscaped" });
     }
 
     private ValueTask DispatchMessageAsync(IAMessage msg)
