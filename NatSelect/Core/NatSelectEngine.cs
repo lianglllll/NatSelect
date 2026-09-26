@@ -10,7 +10,8 @@ namespace NatSelect.Core;
 
 /// <summary>
 /// NatSelect 引擎核心入口
-/// 统一管理启动/关闭生命周期，上层通过此引擎获取所有基础设施能力
+/// 统一管理启动/关闭生命周期，上层通过此引擎获取所有基础设施能力。
+/// 引擎只与外部节点/网关互连（不直接面对客户端），客户端协议由外部网关承接。
 /// </summary>
 public sealed class NatSelectEngine : IAsyncDisposable
 {
@@ -30,11 +31,6 @@ public sealed class NatSelectEngine : IAsyncDisposable
     public ConfigTemplate Config { get; private set; } = new();
     public IActorSystem ActorSystem { get; private set; } = null!;
     public NetworkService? NetworkService { get; private set; }
-
-    // 上层回调：客户端连接/断开/消息事件
-    public Func<TcpConnection, ValueTask>? OnClientConnected { get; set; }
-    public Action<TcpConnection>? OnClientDisconnected { get; set; }
-    public Func<long, Google.Protobuf.IMessage, ValueTask>? OnClientMessage { get; set; }
 
     public EngineState State => _state;
 
@@ -83,21 +79,17 @@ public sealed class NatSelectEngine : IAsyncDisposable
             if (ActorSystem is LocalActorSystem localSystem)
             {
                 localSystem.SetNetworkService(NetworkService);
+
+                // 6.6 初始化引擎内置系统 Actor（RootActor/NameServiceActor/NodeManagerActor）
+                // 网关连接由 NodeManagerActor 编排（含失败重连），引擎不再直接连接
+                localSystem.InitializeSystemActors(Config.Gateway ?? new List<GatewayNodeConfig>(), NetworkService);
             }
 
-            // 6.6 注册客户端回调
-            if (OnClientConnected != null)
-                NetworkService.OnClientConnected = OnClientConnected;
-            if (OnClientDisconnected != null)
-                NetworkService.OnClientDisconnected = OnClientDisconnected;
-            if (OnClientMessage != null)
-                NetworkService.OnClientMessage = OnClientMessage;
+            Log.Information("NetworkService created (ClusterPort: {Port})", Config.Network.ListenPort);
 
-            Log.Information("NetworkService created (Port: {Port})", Config.Network.ListenPort);
-
-            // 7. 启动 TCP 监听
-            await NetworkService.StartListenAsync(Config.Network.ListenPort, Config.Network.MaxConnections);
-            Log.Information("TCP Server listening on port {Port}", Config.Network.ListenPort);
+            // 7. 启动集群端口监听（接受其他节点/网关接入）
+            await NetworkService.StartClusterListenAsync(Config.Network.ListenPort, Config.Network.MaxConnections);
+            Log.Information("Cluster listening on port {Port}", Config.Network.ListenPort);
 
             // 8. 标记运行中
             _state = EngineState.Running;
@@ -152,7 +144,7 @@ public sealed class NatSelectEngine : IAsyncDisposable
 
     private void InitializeLogger()
     {
-        // 从配置读取或使用默认值
+        // 当前日志目录与服务名固定（配置日志段尚未引入，此处不要写"从配置读取"误导）
         string logDir = "logs";
         string serviceName = "NatSelect";
 

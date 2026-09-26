@@ -8,30 +8,35 @@ using Serilog;
 namespace NatSelect.Network;
 
 /// <summary>
-/// 全局网络网关 — 连接池 + 协议编解码 + 消息路由中枢。
+/// 全局网络服务 — 节点互连中枢。
+/// 引擎不直接面对客户端（客户端由外部网关承接），此处只负责：
+/// 1. 集群端口监听：接受其他节点/网关接入
+/// 2. 主动连接外部节点（网关）
+/// 3. Envelope 内部协议路由：反序列化后投递目标 Actor 邮箱
 /// </summary>
 public sealed class NetworkService : IAsyncDisposable
 {
-    // 1. 远程节点连接池：NodeId -> TcpConnection (线程安全)
+    // 1. 已确认身份的节点连接池：NodeId -> TcpConnection (线程安全)
     private readonly ConcurrentDictionary<ulong, TcpConnection> _remoteConnections = new();
 
-    // 2. 客户端连接池：ConnectionId -> TcpConnection
-    private readonly ConcurrentDictionary<long, TcpConnection> _clientConnections = new();
+    // 2. 待确认身份的连接：ConnectionId -> TcpConnection
+    //    监听接受的新连接在收到首个 Envelope 前，不在节点连接池中，发送路径无法命中——天然满足"未确认身份只能收不能发"
+    private readonly ConcurrentDictionary<long, TcpConnection> _pendingConnections = new();
 
-    // 3. 依赖注入
+    // 3. 记录连接是否来自集群监听（断线时回滚监听器计数；主动连接从未计数）
+    private readonly ConcurrentDictionary<long, byte> _listenerAccepted = new();
+
+    // 4. 依赖注入
     private readonly ulong _localNodeId;
     private readonly IActorSystem _actorSystem;
     private readonly ProtoHelper _protoHelper;
 
-    // 4. TCP 服务端监听器
+    // 5. 集群端口监听器
     private TcpServerListener? _listener;
 
-    // 5. 上层回调
-    public Func<TcpConnection, ValueTask>? OnClientConnected { get; set; }
-    public Action<TcpConnection>? OnClientDisconnected { get; set; }
-    public Func<long, IMessage, ValueTask>? OnClientMessage { get; set; }
-
-    public int ClientConnectionCount => _clientConnections.Count;
+    // 6. 节点连接事件（供上层控制面订阅，如 NodeManagerActor；在 I/O 线程触发，处理器应快速返回）
+    public Action<ulong>? OnNodeBound { get; set; }
+    public Action<ulong>? OnNodeDisconnectedEvent { get; set; }
 
     public NetworkService(ulong localNodeId, IActorSystem actorSystem, ProtoHelper protoHelper)
     {
@@ -42,91 +47,68 @@ public sealed class NetworkService : IAsyncDisposable
         Log.Information("NetworkService initialized on NodeId: {NodeId}", _localNodeId);
     }
 
-    #region TCP 服务端监听
+    #region 集群端口监听 (被动接入)
 
     /// <summary>
-    /// 启动 TCP 监听
+    /// 启动集群端口监听，接受其他节点/网关接入
     /// </summary>
-    public async Task StartListenAsync(int port, int maxConnections)
+    public async Task StartClusterListenAsync(int port, int maxConnections)
     {
         _listener = new TcpServerListener();
-        await _listener.StartAsync(port, maxConnections, OnClientSocketAccepted);
+        await _listener.StartAsync(port, maxConnections, OnNodeSocketAccepted);
     }
 
-    private void OnClientSocketAccepted(Socket socket)
+    private void OnNodeSocketAccepted(Socket socket)
     {
         var connection = new TcpConnection(
             socket,
-            onMessageReceived: (connId, msg) => HandleClientMessageAsync(connId, msg),
-            onDisconnected: (connId) => HandleClientDisconnected(connId)
+            onMessageReceived: (connId, msg) => HandleNodeMessage(connId, msg),
+            onDisconnected: (connId) => HandleNodeDisconnected(connId)
         );
 
-        var connId = connection.ConnectionId;
-        if (_clientConnections.TryAdd(connId, connection))
-        {
-            connection.Start();
-            Log.Debug("[NetworkService] Client {ConnId} registered", connId);
-
-            // 通知上层（异步处理器异常不能击穿连接回调）
-            var handler = OnClientConnected;
-            if (handler != null)
-                _ = HandleClientConnectedAsync(handler, connection);
-        }
+        // 身份待确认：收到首个 Envelope 后按 SenderNodeId 绑定进节点连接池
+        _listenerAccepted[connection.ConnectionId] = 0;
+        _pendingConnections[connection.ConnectionId] = connection;
+        connection.Start();
+        Log.Debug("[NetworkService] Node connection accepted: Conn {Id} (identity pending)", connection.ConnectionId);
     }
 
-    private async Task HandleClientConnectedAsync(Func<TcpConnection, ValueTask> handler, TcpConnection connection)
+    #endregion
+
+    #region 主动连接 (连外部节点/网关)
+
+    /// <summary>
+    /// 主动连接外部节点（网关）。连接失败仅记日志返回 false，网关未启动时引擎仍可独立运行。
+    /// </summary>
+    public async Task<bool> ConnectToNodeAsync(string host, int port, ulong nodeId)
     {
+        if (_remoteConnections.ContainsKey(nodeId))
+        {
+            Log.Warning("Already connected to Node {NodeId}, skip duplicate connect", nodeId);
+            return true;
+        }
+
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            await handler(connection);
+            await socket.ConnectAsync(host, port);
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "OnClientConnected handler failed for Conn {Id}", connection.ConnectionId);
+            socket.Dispose();
+            Log.Warning(ex, "Failed to connect to Node {NodeId} at {Host}:{Port}", nodeId, host, port);
+            return false;
         }
-    }
 
-    private void HandleClientMessageAsync(long connId, IMessage msg)
-    {
-        // 路由到上层注册的消息处理器，无处理器时仅记录日志
-        var handler = OnClientMessage;
-        if (handler == null)
-        {
-            Log.Debug("[NetworkService] Received client message from {ConnId}: {Type} (no handler)", connId, msg.GetType().Name);
-            return;
-        }
-        _ = HandleClientMessageSafelyAsync(handler, connId, msg);
-    }
-
-    private async Task HandleClientMessageSafelyAsync(Func<long, IMessage, ValueTask> handler, long connId, IMessage msg)
-    {
-        try
-        {
-            await handler(connId, msg);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "OnClientMessage handler failed for Conn {Id}, Type {Type}", connId, msg.GetType().Name);
-        }
-    }
-
-    private void HandleClientDisconnected(long connId)
-    {
-        if (_clientConnections.TryRemove(connId, out var connection))
-        {
-            Log.Debug("[NetworkService] Client {ConnId} disconnected", connId);
-            _listener?.OnConnectionClosed();
-
-            // 通知上层（上层回调异常不能击穿断线清理路径）
-            try
-            {
-                OnClientDisconnected?.Invoke(connection);
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "OnClientDisconnected handler failed for Conn {Id}", connId);
-            }
-        }
+        var connection = new TcpConnection(
+            socket,
+            onMessageReceived: (connId, msg) => HandleNodeMessage(connId, msg),
+            onDisconnected: (connId) => HandleNodeDisconnected(connId)
+        );
+        connection.Start();
+        RegisterRemoteNode(nodeId, connection);
+        Log.Information("Connected to Node {NodeId} at {Host}:{Port} (Conn {Id})", nodeId, host, port, connection.ConnectionId);
+        return true;
     }
 
     #endregion
@@ -135,7 +117,13 @@ public sealed class NetworkService : IAsyncDisposable
 
     public void RegisterRemoteNode(ulong nodeId, TcpConnection connection)
     {
-        _remoteConnections.AddOrUpdate(nodeId, connection, (_, _) => connection);
+        _remoteConnections.AddOrUpdate(nodeId, connection, (_, existing) =>
+        {
+            // 替换语义：关闭被替换的旧连接，防止其继续收包造成同 NodeId 消息双路径
+            if (!ReferenceEquals(existing, connection))
+                existing.Close();
+            return connection;
+        });
         Log.Information("Registered remote connection to Node: {NodeId}", nodeId);
     }
 
@@ -148,14 +136,96 @@ public sealed class NetworkService : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// 向指定客户端发送消息
-    /// </summary>
-    public void SendToClient(long connId, Google.Protobuf.IMessage message)
+    #endregion
+
+    #region 节点消息接收 (统一入口)
+
+    private void HandleNodeMessage(long connId, IMessage msg)
     {
-        if (_clientConnections.TryGetValue(connId, out var connection))
+        // 节点连接只允许 Envelope 内部协议，其余类型一律丢弃（业务消息必须装在 Envelope 里）
+        if (msg is not NatSelectEnvelope envelope)
         {
-            connection.Send(message);
+            Log.Warning("[NetworkService] Non-envelope message from Conn {Id}: {Type} (dropped)", connId, msg.GetType().Name);
+            return;
+        }
+
+        BindPendingConnection(connId, envelope.SenderNodeId);
+        _ = HandleIncomingEnvelopeSafelyAsync(envelope);
+    }
+
+    /// <summary>
+    /// 学习式节点注册：监听接受的新连接在收到首个 Envelope 后，按 SenderNodeId 绑定进节点连接池。
+    /// </summary>
+    private void BindPendingConnection(long connId, ulong senderNodeId)
+    {
+        if (!_pendingConnections.TryGetValue(connId, out var connection))
+            return; // 主动连接已注册，或连接已消失
+
+        if (_remoteConnections.TryAdd(senderNodeId, connection))
+        {
+            _pendingConnections.TryRemove(connId, out _);
+            Log.Information("Node {NodeId} bound to Conn {Id}", senderNodeId, connId);
+            SafeInvokeEvent(OnNodeBound, senderNodeId);
+            return;
+        }
+
+        // TryAdd 失败：并发重复消息下本连接可能已绑定，或 NodeId 被其他连接占用
+        if (_remoteConnections.TryGetValue(senderNodeId, out var existing) && existing.ConnectionId == connId)
+        {
+            _pendingConnections.TryRemove(connId, out _);
+            return;
+        }
+
+        Log.Warning("Duplicate NodeId {NodeId} from Conn {Id}, closing connection", senderNodeId, connId);
+        connection.Close();
+    }
+
+    private async Task HandleIncomingEnvelopeSafelyAsync(NatSelectEnvelope envelope)
+    {
+        try
+        {
+            await HandleIncomingEnvelopeAsync(envelope);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to handle incoming envelope from Node {Sender}", envelope.SenderNodeId);
+        }
+    }
+
+    private void HandleNodeDisconnected(long connId)
+    {
+        _pendingConnections.TryRemove(connId, out _);
+
+        // 回滚监听器连接计数（仅对来自监听的连接）
+        if (_listenerAccepted.TryRemove(connId, out _))
+            _listener?.OnConnectionClosed();
+
+        // 按连接标识清理节点连接池（节点数少，遍历成本可忽略）
+        foreach (var kv in _remoteConnections)
+        {
+            if (kv.Value.ConnectionId != connId) continue;
+            if (_remoteConnections.TryRemove(kv.Key, out var conn))
+            {
+                Log.Information("Node {NodeId} disconnected (Conn {Id})", kv.Key, connId);
+                conn.Close(); // 幂等，确保资源释放
+                SafeInvokeEvent(OnNodeDisconnectedEvent, kv.Key);
+            }
+            break;
+        }
+    }
+
+    /// <summary>
+    /// 安全调用节点事件处理器：上层处理器异常不能击穿 I/O 回调路径
+    /// </summary>
+    private static void SafeInvokeEvent(Action<ulong>? handler, ulong nodeId)
+    {
+        try
+        {
+            handler?.Invoke(nodeId);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Node event handler failed for Node {NodeId}", nodeId);
         }
     }
 
@@ -209,8 +279,8 @@ public sealed class NetworkService : IAsyncDisposable
     #region 远程接收 (远程 -> 本地)
 
     /// <summary>
-    /// 处理收到的网络包
-    /// 由 TcpConnection 回调直接调用
+    /// 处理收到的 Envelope 网络包
+    /// 由 HandleNodeMessage 统一入口调用
     /// </summary>
     public async ValueTask HandleIncomingEnvelopeAsync(NatSelectEnvelope envelope)
     {
@@ -257,14 +327,15 @@ public sealed class NetworkService : IAsyncDisposable
             await _listener.StopAsync();
         }
 
-        // 2. 关闭所有客户端连接
-        foreach (var conn in _clientConnections.Values)
+        // 2. 关闭所有待确认连接
+        foreach (var conn in _pendingConnections.Values)
         {
             conn.Close();
         }
-        _clientConnections.Clear();
+        _pendingConnections.Clear();
+        _listenerAccepted.Clear();
 
-        // 3. 关闭所有远程节点连接
+        // 3. 关闭所有节点连接
         foreach (var conn in _remoteConnections.Values)
         {
             conn.Close();

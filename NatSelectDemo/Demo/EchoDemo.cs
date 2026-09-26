@@ -13,12 +13,8 @@ public static class EchoDemo
     {
         Log.Information("========== NatSelect Demo Starting ==========");
 
-        // 1. 创建根上下文（所有 Demo Actor 的父节点）
-        var rootContext = new ActorContext(
-            engine.ActorSystem,
-            new ActorRef(engine.NodeId, 999999),
-            parent: null,
-            path: "/");
+        // 1. 使用引擎内置根上下文（所有 Demo Actor 挂在 RootActor 下）
+        var rootContext = engine.ActorSystem.RootContext;
 
         // 2. 创建两个 EchoActor
         var echo1Ref = engine.ActorSystem.SpawnActor<EchoActor>(rootContext, "echo-1");

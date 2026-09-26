@@ -10,10 +10,17 @@ node:
     max_mailbox_size: 10000
     worker_threads: 4
 
-# 网络配置
+# 网络配置（集群端口：接受其他节点/网关接入，不直接面对客户端）
 network:
   listen_port: 9000
   max_connections: 5000
+
+# 网关连接配置（引擎主动连接的外部网关/节点，空数组则纯监听）
+gateway: []
+  # 示例：
+  # - host: "127.0.0.1"
+  #   port: 10400
+  #   node_id: 100
 
 # 数据库配置
 database:

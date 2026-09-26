@@ -2,6 +2,7 @@
 using System.Reflection;
 using System.Text;
 using NatSelect.Config.Template;
+using NatSelect.Core.System;
 using NatSelect.Network;
 using Serilog;
 
@@ -16,7 +17,8 @@ public sealed class LocalActorSystem : IActorSystem
     private readonly ConcurrentDictionary<string, ActorRef> _services = new();
     // 索引：target ActorId -> (watcher ActorId -> true)，方便快速查找谁在监视某个目标
     private readonly ConcurrentDictionary<ulong, ConcurrentDictionary<ulong, bool>> _watchersByTarget = new();
-    private ulong _nextActorId = 1;
+    // ActorId 段约定：0=Invalid 哨兵，1-999 保留给系统（1=虚拟根），业务 Actor 从 1000 开始
+    private ulong _nextActorId = 1000;
     private readonly ActorSystemConfig _config;
     private readonly ActorScheduler _scheduler;
 
@@ -24,6 +26,18 @@ public sealed class LocalActorSystem : IActorSystem
     private static readonly ConcurrentDictionary<string, ConstructorInfo> s_ctorCache = new();
 
     public ulong NodeId { get; }
+
+    /// <summary>
+    /// 监督树根上下文（引擎内置 RootActor 的上下文，上层 Actor 应挂载于此）
+    /// </summary>
+    public ActorContext RootContext { get; private set; } = null!;
+
+    /// <summary>
+    /// 内置系统 Actor 引用
+    /// </summary>
+    public ActorRef RootActorRef { get; private set; }
+    public ActorRef NameServiceRef { get; private set; }
+    public ActorRef NodeManagerRef { get; private set; }
 
     public LocalActorSystem(ulong nodeId, ActorSystemConfig config)
     {
@@ -60,7 +74,47 @@ public sealed class LocalActorSystem : IActorSystem
 
         // 注册到系统
         _actors.TryAdd(actorId, actor);
+
+        // 若父上下文属于已注册的真实 Actor，登记父子关系（诊断树完整性；监督 Watch 仍由 SpawnChild 显式管理）
+        if (parent != null && _actors.ContainsKey(parent.Self.ActorId))
+        {
+            parent.RegisterChild(name, selfRef);
+        }
         return selfRef;
+    }
+
+    /// <summary>
+    /// 初始化引擎内置系统 Actor：RootActor（监督树根）、NameServiceActor（名字服务）、NodeManagerActor（节点连接管理）。
+    /// 在 NetworkService 创建并注入后调用一次；连接事件接线到 NodeManagerActor 邮箱。
+    /// </summary>
+    public void InitializeSystemActors(List<GatewayNodeConfig> gateways, NetworkService networkService)
+    {
+        // 虚拟根上下文：ActorId=1 为保留的系统虚拟根（不注册进 _actors）
+        var virtualRootContext = new ActorContext(this, new ActorRef(NodeId, 1), null, "/");
+
+        var rootRef = SpawnActor<RootActor>(virtualRootContext, "root");
+        RootActorRef = rootRef;
+        RootContext = _actors[rootRef.ActorId].Context;
+
+        var nameServiceRef = SpawnActor<NameServiceActor>(RootContext, "name-service", this);
+        NameServiceRef = nameServiceRef;
+        RegisterService("name-service", nameServiceRef);
+
+        var nodeManagerRef = SpawnActor<NodeManagerActor>(RootContext, "node-manager", gateways, networkService);
+        NodeManagerRef = nodeManagerRef;
+        RegisterService("node-manager", nodeManagerRef);
+
+        // 接线：NetworkService 连接事件 -> NodeManagerActor 邮箱（事件在 I/O 线程触发，投递线程安全）
+        networkService.OnNodeBound = nodeId =>
+            _ = SendAsync(nodeManagerRef, new NodeBoundMessage { NodeId = nodeId });
+        networkService.OnNodeDisconnectedEvent = nodeId =>
+            _ = SendAsync(nodeManagerRef, new NodeDisconnectedMessage { NodeId = nodeId });
+
+        // 发起初始连接管理（网关连接由 NodeManagerActor 编排，含失败重连）
+        _ = SendAsync(nodeManagerRef, new StartManageMessage());
+
+        Log.Information("[ActorSystem] System actors initialized (root: {Root}, name-service: {Name}, node-manager: {Node})",
+            rootRef, nameServiceRef, nodeManagerRef);
     }
 
     public ValueTask SendAsync(ActorRef target, IAMessage message)
@@ -168,26 +222,14 @@ public sealed class LocalActorSystem : IActorSystem
             var current = stack.Pop();
             if (snapshots.ContainsKey(current.Context.Self.ActorId)) continue; // 重检时可能重复入栈
 
-            var children = new List<ActorSnapshot>();
-            bool allChildrenReady = true;
-            foreach (var childRef in current.Context.Children.Values)
-            {
-                if (!_actors.TryGetValue(childRef.ActorId, out var childActor)) continue;
-
-                if (snapshots.TryGetValue(childRef.ActorId, out var childSnapshot))
-                {
-                    children.Add(childSnapshot);
-                }
-                else
-                {
-                    allChildrenReady = false;
-                    stack.Push(childActor);
-                }
-            }
+            bool allChildrenReady = TryCollectChildren(current, snapshots, out var children, out var pendingChildren);
 
             if (!allChildrenReady)
             {
-                stack.Push(current); // 待子节点快照就绪后再重建
+                // 先压 current 再压未就绪子节点：LIFO 保证子节点先被处理，否则 current 会反复弹出导致死循环
+                stack.Push(current);
+                foreach (var pending in pendingChildren)
+                    stack.Push(pending);
                 continue;
             }
 
@@ -205,6 +247,33 @@ public sealed class LocalActorSystem : IActorSystem
         }
 
         return snapshots[actor.Context.Self.ActorId];
+    }
+
+    /// <summary>
+    /// 收集子 Actor 快照：已就绪的直接加入 children，未就绪的进入 pendingChildren 待后序处理
+    /// </summary>
+    private bool TryCollectChildren(Actor current, Dictionary<ulong, ActorSnapshot> snapshots,
+        out List<ActorSnapshot> children, out List<Actor> pendingChildren)
+    {
+        children = new List<ActorSnapshot>();
+        pendingChildren = new List<Actor>();
+        bool allChildrenReady = true;
+
+        foreach (var childRef in current.Context.Children.Values)
+        {
+            if (!_actors.TryGetValue(childRef.ActorId, out var childActor)) continue;
+
+            if (snapshots.TryGetValue(childRef.ActorId, out var childSnapshot))
+            {
+                children.Add(childSnapshot);
+            }
+            else
+            {
+                allChildrenReady = false;
+                pendingChildren.Add(childActor);
+            }
+        }
+        return allChildrenReady;
     }
 
     #endregion

@@ -15,6 +15,10 @@ public class ConfigTemplate
     [YamlMember(Alias = "network")]
     public NetworkConfig Network { get; set; } = new();
 
+    // 引擎主动连接的外部网关/节点列表（可为空，不填则纯监听）
+    [YamlMember(Alias = "gateway")]
+    public List<GatewayNodeConfig> Gateway { get; set; } = new();
+
     [YamlMember(Alias = "database")]
     public DatabaseConfig Database { get; set; } = new();
 
@@ -44,11 +48,24 @@ public class ActorSystemConfig
 
 public class NetworkConfig
 {
+    // 集群端口：接受其他节点/网关接入（不直接面对客户端）
     [YamlMember(Alias = "listen_port")]
     public int ListenPort { get; set; } = 9000;
 
     [YamlMember(Alias = "max_connections")]
     public int MaxConnections { get; set; } = 10000;
+}
+
+public class GatewayNodeConfig
+{
+    [YamlMember(Alias = "host")]
+    public string Host { get; set; } = "";
+
+    [YamlMember(Alias = "port")]
+    public int Port { get; set; } = 0;
+
+    [YamlMember(Alias = "node_id")]
+    public ulong NodeId { get; set; } = 0;
 }
 
 public class DatabaseConfig

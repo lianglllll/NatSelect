@@ -16,6 +16,11 @@ public interface IActorSystem : IAsyncDisposable
     /// </summary>
     ulong NodeId { get; }
 
+    /// <summary>
+    /// 监督树根上下文（引擎内置 RootActor 的上下文，上层 Actor 应挂载于此）
+    /// </summary>
+    ActorContext RootContext { get; }
+
     // Actor生命周期
     ActorRef SpawnActor<T>(ActorContext parent, string name, params object[] args) where T : Actor;
     ValueTask StopActorAsync(ActorRef actorRef);

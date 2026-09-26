@@ -4,6 +4,7 @@ using Serilog;
 using NatSelect.Common;
 using NatSelect.Core;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 
 namespace NatSelect.Network;
 
@@ -13,8 +14,9 @@ namespace NatSelect.Network;
 public class ProtoHelper : Singleton<ProtoHelper>
 {
     //考虑到每次输送类型名太长了，所以imessage类型一个序号
-    private static Dictionary<int, Type> m_sequence2type = new Dictionary<int, Type>();
-    private static Dictionary<Type, int> m_type2sequence = new Dictionary<Type, int>();
+    // 并发容器：业务启动阶段注册 + I/O 线程运行时查表，读写并发安全
+    private static ConcurrentDictionary<int, Type> m_sequence2type = new();
+    private static ConcurrentDictionary<Type, int> m_type2sequence = new();
 
     public new void Init()
     {
@@ -27,7 +29,8 @@ public class ProtoHelper : Singleton<ProtoHelper>
     }
 
     /// <summary>
-    /// 自动扫描程序集，注册所有带 [ProtoId] 特性的 IMessage 类型
+    /// 自动注册引擎内部传输协议（当前仅 NatSelectEnvelope）。
+    /// 业务协议由上层通过 Register&lt;T&gt;(id) 显式注入——引擎不得硬编码任何业务协议号与消息类型。
     /// </summary>
     public void AutoRegisterAll()
     {
@@ -69,15 +72,13 @@ public class ProtoHelper : Singleton<ProtoHelper>
 
     public int Type2Seq(Type type)
     {
-        if (m_type2sequence.ContainsKey(type))
+        if (m_type2sequence.TryGetValue(type, out var code))
         {
-            return m_type2sequence[type];
+            return code;
         }
-        else
-        {
-            Log.Error($"[ProtoHelper.Type2Seq]未找到对应的协议类型:{type.ToString()}");
-            return -1;
-        }
+
+        Log.Error($"[ProtoHelper.Type2Seq]未找到对应的协议类型:{type.ToString()}");
+        return -1;
     }
 
     public Type? Seq2Type(int code)
@@ -136,7 +137,10 @@ public class ProtoHelper : Singleton<ProtoHelper>
             {
                 return null;
             }
-            ds.WriteInt(message.CalculateSize() + 2);           //长度字段
+            // 帧格式约定：[2字节大端协议号][Protobuf数据]
+            // 外层长度头由 TcpConnection.PrependLengthHeader 统一添加，此处不再写内层长度
+            // （历史版本在此多写 4 字节长度，导致接收端 ByteArrayParse2IMessage 从偏移 0 读到的
+            //  是长度字段而非协议号，收发格式错位）
             ds.WriteUShort((ushort)code);                       //协议编号字段
             message.WriteTo(ds);                                //数据
             return ds.ToArray();

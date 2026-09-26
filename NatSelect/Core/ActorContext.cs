@@ -69,6 +69,14 @@ public sealed class ActorContext : IAsyncDisposable
         return childRef;
     }
 
+    /// <summary>
+    /// 注册子 Actor 引用（由 ActorSystem.SpawnActor 自动调用，保证诊断树完整性；不触发 Watch）
+    /// </summary>
+    internal void RegisterChild(string name, ActorRef childRef)
+    {
+        m_children.TryAdd(name, childRef);
+    }
+
     public async ValueTask StopChildAsync(string name)
     {
         if (m_children.TryRemove(name, out var childRef))

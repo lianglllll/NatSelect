@@ -2,6 +2,10 @@ syntax = "proto3";
 package NatSelect.Protobuf.Interval;
 option csharp_namespace = "NatSelect.Protobuf.Interval";
 
+// 引擎传输协议定义。
+// 原则：本文件只允许定义引擎内部传输协议（Envelope），禁止添加任何业务消息。
+// 业务协议由上层项目定义，并通过 ProtoHelper.Register 注入引擎。
+
 message NatSelectEnvelope
 {
 	uint64 sender_node_id	= 1;

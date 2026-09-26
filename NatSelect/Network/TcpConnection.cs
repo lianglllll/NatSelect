@@ -8,6 +8,10 @@ using System.Threading.Channels;
 
 namespace NatSelect.Network;
 
+/// <summary>
+/// TCP 节点连接封装：粘包拆包 + 发送队列 + 断线回调。
+/// 节点连接只承载引擎内部协议（NatSelectEnvelope），业务消息装在 Envelope.Payload 中。
+/// </summary>
 public class TcpConnection
 {
     // Socket Handle 值在关闭后会被 OS 复用，不能作为连接标识，改用进程内原子计数器

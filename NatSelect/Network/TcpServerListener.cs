@@ -5,8 +5,8 @@ using Serilog;
 namespace NatSelect.Network;
 
 /// <summary>
-/// TCP 服务端监听器
-/// 负责接受客户端连接，并将 Socket 传递给上层处理
+/// TCP 集群端口监听器
+/// 负责接受其他节点与网关的连接，并将 Socket 传递给上层处理
 /// </summary>
 public sealed class TcpServerListener : IAsyncDisposable
 {
@@ -36,7 +36,7 @@ public sealed class TcpServerListener : IAsyncDisposable
         _listenSocket.Bind(new IPEndPoint(IPAddress.Any, port));
         _listenSocket.Listen(maxConnections);
 
-        Log.Information("[TcpServerListener] Listening on port {Port} (max: {Max})", port, maxConnections);
+        Log.Information("[TcpServerListener] Cluster listening on port {Port} (max: {Max})", port, maxConnections);
 
         // 异步接受连接循环
         _ = AcceptLoopAsync();
@@ -53,13 +53,13 @@ public sealed class TcpServerListener : IAsyncDisposable
                 // 检查连接数限制
                 if (Interlocked.Increment(ref _currentConnectionCount) > _maxConnections)
                 {
-                    Log.Warning("[TcpServerListener] Connection limit reached ({Max}), rejecting client", _maxConnections);
+                    Log.Warning("[TcpServerListener] Connection limit reached ({Max}), rejecting connection", _maxConnections);
                     Interlocked.Decrement(ref _currentConnectionCount);
                     clientSocket.Close();
                     continue;
                 }
 
-                Log.Debug("[TcpServerListener] Client connected from {Remote}", clientSocket.RemoteEndPoint);
+                Log.Debug("[TcpServerListener] Node connected from {Remote}", clientSocket.RemoteEndPoint);
                 _onClientAccepted?.Invoke(clientSocket);
             }
             catch (ObjectDisposedException)
