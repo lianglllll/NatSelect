@@ -18,6 +18,7 @@ alwaysApply: true
 |------|---------|
 | `NatSelect/Common/` | `NatSelect.Common` |
 | `NatSelect/Core/` | `NatSelect.Core` |
+| `NatSelect/BuiltinActor/` | `NatSelect.BuiltinActor` |
 | `NatSelect/Network/` | `NatSelect.Network` |
 | `NatSelect/Config/` | `NatSelect.Config` |
 | `NatSelect/Logger/` | `NatSelect.Logger` |

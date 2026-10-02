@@ -1,6 +1,6 @@
 using NatSelect.Core;
 
-namespace NatSelect.Core.System;
+namespace NatSelect.BuiltinActor;
 
 /// <summary>
 /// 引擎内置根 Actor：监督树的地基。

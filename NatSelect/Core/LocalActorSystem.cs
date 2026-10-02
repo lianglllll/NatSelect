@@ -2,7 +2,6 @@
 using System.Reflection;
 using System.Text;
 using NatSelect.Config.Template;
-using NatSelect.Core.System;
 using NatSelect.Network;
 using Serilog;
 
@@ -33,11 +32,11 @@ public sealed class LocalActorSystem : IActorSystem
     public ActorContext RootContext { get; private set; } = null!;
 
     /// <summary>
-    /// 内置系统 Actor 引用
+    /// 内置系统 Actor 引用（由引擎启动编排层初始化后写入）
     /// </summary>
-    public ActorRef RootActorRef { get; private set; }
-    public ActorRef NameServiceRef { get; private set; }
-    public ActorRef NodeManagerRef { get; private set; }
+    public ActorRef RootActorRef { get; set; }
+    public ActorRef NameServiceRef { get; set; }
+    public ActorRef NodeManagerRef { get; set; }
 
     public LocalActorSystem(ulong nodeId, ActorSystemConfig config)
     {
@@ -84,37 +83,11 @@ public sealed class LocalActorSystem : IActorSystem
     }
 
     /// <summary>
-    /// 初始化引擎内置系统 Actor：RootActor（监督树根）、NameServiceActor（名字服务）、NodeManagerActor（节点连接管理）。
-    /// 在 NetworkService 创建并注入后调用一次；连接事件接线到 NodeManagerActor 邮箱。
+    /// 设置监督树根上下文（引擎编排层在 RootActor 生成后调用）
     /// </summary>
-    public void InitializeSystemActors(List<GatewayNodeConfig> gateways, NetworkService networkService)
+    public void SetRootContext(ActorRef rootRef)
     {
-        // 虚拟根上下文：ActorId=1 为保留的系统虚拟根（不注册进 _actors）
-        var virtualRootContext = new ActorContext(this, new ActorRef(NodeId, 1), null, "/");
-
-        var rootRef = SpawnActor<RootActor>(virtualRootContext, "root");
-        RootActorRef = rootRef;
         RootContext = _actors[rootRef.ActorId].Context;
-
-        var nameServiceRef = SpawnActor<NameServiceActor>(RootContext, "name-service", this);
-        NameServiceRef = nameServiceRef;
-        RegisterService("name-service", nameServiceRef);
-
-        var nodeManagerRef = SpawnActor<NodeManagerActor>(RootContext, "node-manager", gateways, networkService);
-        NodeManagerRef = nodeManagerRef;
-        RegisterService("node-manager", nodeManagerRef);
-
-        // 接线：NetworkService 连接事件 -> NodeManagerActor 邮箱（事件在 I/O 线程触发，投递线程安全）
-        networkService.OnNodeBound = nodeId =>
-            _ = SendAsync(nodeManagerRef, new NodeBoundMessage { NodeId = nodeId });
-        networkService.OnNodeDisconnectedEvent = nodeId =>
-            _ = SendAsync(nodeManagerRef, new NodeDisconnectedMessage { NodeId = nodeId });
-
-        // 发起初始连接管理（网关连接由 NodeManagerActor 编排，含失败重连）
-        _ = SendAsync(nodeManagerRef, new StartManageMessage());
-
-        Log.Information("[ActorSystem] System actors initialized (root: {Root}, name-service: {Name}, node-manager: {Node})",
-            rootRef, nameServiceRef, nodeManagerRef);
     }
 
     public ValueTask SendAsync(ActorRef target, IAMessage message)

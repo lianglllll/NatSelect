@@ -32,14 +32,14 @@ NatSelect/
 │   │   ├── ActorRef.cs          # 分布式 Actor 引用
 │   │   ├── ActorScheduler.cs    # Worker 线程池调度器
 │   │   ├── ActorTimer.cs        # 定时器实现
-│   │   ├── ActorInfo.cs         # 诊断信息 DTO
+│   │   ├── ActorSnapshot.cs     # 诊断信息 DTO（只读快照）
 │   │   ├── IActorSystem.cs      # ActorSystem 接口
 │   │   ├── LocalActorSystem.cs  # 单机版 ActorSystem 实现
-│   │   ├── IAMessage.cs         # 消息接口体系
-│   │   └── System/              # 引擎内置系统 Actor
-│   │       ├── RootActor.cs         # 监督树根（ActorId=1001）
-│   │       ├── NameServiceActor.cs  # 名字服务（对应 Skynet .service）
-│   │       └── NodeManagerActor.cs  # 节点连接控制面（网关重连编排）
+│   │   └── IAMessage.cs         # 消息接口体系
+│   ├── BuiltinActor/       # 引擎内置系统 Actor（监督树根/名字服务/节点管理）
+│   │   ├── RootActor.cs         # 监督树根（ActorId=1001）
+│   │   ├── NameServiceActor.cs  # 名字服务（对应 Skynet .service）
+│   │   └── NodeManagerActor.cs  # 节点连接控制面（网关重连编排）
 │   ├── Logger/             # Serilog 结构化日志 (NSLogger)
 │   └── Network/            # TCP 网络层（节点互连，不面对客户端）
 │       ├── NetworkService.cs     # 节点互连中枢（监听 + 主动连接 + Envelope 路由）

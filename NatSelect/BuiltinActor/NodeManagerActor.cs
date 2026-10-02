@@ -2,7 +2,7 @@ using NatSelect.Config.Template;
 using NatSelect.Core;
 using NatSelect.Network;
 
-namespace NatSelect.Core.System;
+namespace NatSelect.BuiltinActor;
 
 /// <summary>
 /// 节点连接管理 Actor（控制面，对应 Skynet 的 cmaster/harbor 管理）。

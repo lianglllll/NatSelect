@@ -1,6 +1,6 @@
 using NatSelect.Core;
 
-namespace NatSelect.Core.System;
+namespace NatSelect.BuiltinActor;
 
 /// <summary>
 /// 名字服务 Actor：服务名 -> ActorRef 的注册与查询权威通道（对应 Skynet 的 .service 服务）。
